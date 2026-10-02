@@ -630,39 +630,8 @@ class AppState extends ChangeNotifier {
       _noteTodos.clear();
     }
 
-    // Immediately provide exactly 1 valid starter workspace so the workspace dashboard displays with zero delay
-    if (workspaces.isEmpty) {
-      final defaultWs = WorkspaceModel(
-        id: 'default_${user.uid}',
-        userId: user.uid,
-        name: 'My Workspace',
-        description: 'Personal notes & workspace',
-        icon: 'book',
-        createdAt: DateTime.now(),
-        updatedAt: DateTime.now(),
-      );
-      workspaces = [defaultWs];
-      currentWorkspace = defaultWs;
-    } else {
+    if (workspaces.isNotEmpty) {
       currentWorkspace ??= workspaces.first;
-    }
-
-    // Immediately provide exactly 1 default notebook so the UI shows 1 notebook by default
-    if (canvasDocs.isEmpty && currentWorkspace != null) {
-      final defaultNotebook = CanvasDocModel(
-        id: 'notebook_${currentWorkspace!.id}_default',
-        workspaceId: currentWorkspace!.id,
-        name: 'Personal Notes',
-        docType: CanvasDocType.notebook,
-        coverColor: const Color(0xFF2E7D32),
-        coverEmoji: '📓',
-      );
-      canvasDocs = [defaultNotebook];
-      currentCanvasDoc = defaultNotebook;
-      currentPageIndex = 0;
-      canvasPaperStyle = CanvasPaperStyle.ruledLines;
-      isPageViewMode = true;
-      canvasObjects = [];
     }
   }
 
@@ -1168,7 +1137,49 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void>? _inFlightLoadUserWorkspaces;
+
+  void _deduplicateWorkspaces() {
+    final Map<String, WorkspaceModel> seen = {};
+    final List<WorkspaceModel> unique = [];
+    bool hasMyWorkspace = false;
+    for (final ws in workspaces) {
+      if (ws.id.startsWith('default_')) continue;
+      if (seen.containsKey(ws.id)) continue;
+      seen[ws.id] = ws;
+
+      final isDefaultWs = ws.name.trim().toLowerCase() == 'my workspace' || ws.name.trim().toLowerCase() == 'default workspace';
+      if (isDefaultWs) {
+        if (!hasMyWorkspace) {
+          hasMyWorkspace = true;
+          unique.add(ws);
+        } else {
+          // Extra duplicate default workspace: delete from Firestore in background
+          if (userId != null && userId != 'local_user') {
+            firestoreService.deleteWorkspace(userId!, ws.id).catchError((_) {});
+          }
+        }
+      } else {
+        unique.add(ws);
+      }
+    }
+    workspaces = unique;
+  }
+
   Future<void> loadUserWorkspaces() async {
+    if (_inFlightLoadUserWorkspaces != null) {
+      return _inFlightLoadUserWorkspaces;
+    }
+    final future = _doLoadUserWorkspaces();
+    _inFlightLoadUserWorkspaces = future;
+    try {
+      await future;
+    } finally {
+      _inFlightLoadUserWorkspaces = null;
+    }
+  }
+
+  Future<void> _doLoadUserWorkspaces() async {
     _syncCurrentPageObjects();
     if (currentCanvasDoc != null && userId != null && userId != 'local_user' && !currentCanvasDoc!.id.startsWith('notebook_default_')) {
       NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
@@ -1176,6 +1187,7 @@ class AppState extends ChangeNotifier {
 
     try {
       await fetchWorkspaces();
+      _deduplicateWorkspaces();
       if (workspaces.isNotEmpty) {
         await selectWorkspace(workspaces.first);
       } else {
@@ -1185,7 +1197,6 @@ class AppState extends ChangeNotifier {
           description: 'Personal notes & workspace',
           icon: 'book',
         );
-        // Note: createWorkspace already calls selectWorkspace(ws) internally!
       }
     } catch (e) {
       debugPrint('Error loading workspaces: $e');
@@ -1243,7 +1254,9 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     try {
       if (userId == null) return;
-      workspaces = await firestoreService.getWorkspaces(userId!);
+      final loaded = await firestoreService.getWorkspaces(userId!);
+      workspaces = loaded;
+      _deduplicateWorkspaces();
     } catch (e) {
       debugPrint('Error fetching workspaces: $e');
     } finally {
@@ -1259,6 +1272,16 @@ class AppState extends ChangeNotifier {
   }) async {
     try {
       if (userId == null) return null;
+      // Prevent duplicate "My Workspace" if one already exists
+      if (name.trim().toLowerCase() == 'my workspace') {
+        _deduplicateWorkspaces();
+        final existing = workspaces.where((w) => w.name.trim().toLowerCase() == 'my workspace');
+        if (existing.isNotEmpty) {
+          await selectWorkspace(existing.first);
+          return existing.first;
+        }
+      }
+
       final ws = await firestoreService.createWorkspace(
         userId: userId!,
         name: name,
@@ -1267,7 +1290,10 @@ class AppState extends ChangeNotifier {
       );
       // Remove any temporary unpersisted starter workspace (e.g. 'default_${user.uid}')
       workspaces.removeWhere((w) => w.id.startsWith('default_'));
-      workspaces.insert(0, ws);
+      if (!workspaces.any((w) => w.id == ws.id)) {
+        workspaces.insert(0, ws);
+      }
+      _deduplicateWorkspaces();
       await selectWorkspace(ws);
       return ws;
     } catch (e) {
@@ -1335,10 +1361,14 @@ class AppState extends ChangeNotifier {
 
   Future<void> selectWorkspace(WorkspaceModel ws) async {
     _syncCurrentPageObjects();
-    if (currentCanvasDoc != null) {
+    if (currentCanvasDoc != null && userId != null && userId != 'local_user' && !currentCanvasDoc!.id.startsWith('notebook_default_')) {
       NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
     }
     currentWorkspace = ws;
+    // Clear canvasDocs so docs from previous workspace or temporary starter don't cross-contaminate
+    canvasDocs = [];
+    currentCanvasDoc = null;
+    canvasObjects = [];
     notifyListeners();
     await Future.wait([
       fetchWorkspaceConversations(ws.id),
@@ -1517,27 +1547,45 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  List<CanvasDocModel> _deduplicateStarterNotebooks(List<CanvasDocModel> docs, String workspaceId) {
+    if (docs.length <= 1) return docs;
+
+    final personalNotes = docs.where(
+      (d) => d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1',
+    ).toList();
+
+    if (personalNotes.length <= 1) return docs;
+
+    // Sort descending by content so the notebook with the most user drawings/pages is preserved:
+    personalNotes.sort((a, b) {
+      final aObjCount = a.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
+      final bObjCount = b.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
+      if (aObjCount != bObjCount) return bObjCount.compareTo(aObjCount);
+      if (a.pages.length != b.pages.length) return b.pages.length.compareTo(a.pages.length);
+      return a.id.compareTo(b.id);
+    });
+
+    final toRemove = personalNotes.sublist(1);
+    final updated = List<CanvasDocModel>.from(docs);
+    for (final dup in toRemove) {
+      updated.removeWhere((d) => d.id == dup.id);
+      if (userId != null && userId != 'local_user') {
+        NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
+        if (isAuthenticated) {
+          try {
+            firestoreService.deleteCanvasDoc(userId!, workspaceId, dup.id).catchError((_) {});
+          } catch (_) {}
+        }
+      }
+    }
+    return updated;
+  }
+
   Future<void> _doFetchWorkspaceCanvasDocs(String workspaceId) async {
     // 1. Immediately hydrate from local storage for this specific workspace
     try {
-      final wsLocalDocs = await NotesLocalStorageService.loadDocsForWorkspace(workspaceId, userId: userId);
-
-      // Deduplicate any empty starter notes locally if duplicates were previously stored
-      if (wsLocalDocs.length > 1) {
-        final starterNotes = wsLocalDocs.where(
-          (d) => (d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1') &&
-                 d.pages.length <= 1 &&
-                 (d.pages.isEmpty || d.pages.first.objects.isEmpty),
-        ).toList();
-
-        if (starterNotes.length > 1) {
-          for (int i = 1; i < starterNotes.length; i++) {
-            final dup = starterNotes[i];
-            wsLocalDocs.removeWhere((d) => d.id == dup.id);
-            NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
-          }
-        }
-      }
+      var wsLocalDocs = await NotesLocalStorageService.loadDocsForWorkspace(workspaceId, userId: userId);
+      wsLocalDocs = _deduplicateStarterNotebooks(wsLocalDocs, workspaceId);
 
       if (wsLocalDocs.isNotEmpty) {
         canvasDocs = wsLocalDocs;
@@ -1605,28 +1653,10 @@ class AppState extends ChangeNotifier {
           }
         }
 
-        // Deduplicate duplicate starter notes if duplicate "Personal Notes" were previously created
-        if (mergedDocs.length > 1) {
-          final starterNotes = mergedDocs.values.where(
-            (d) => (d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1') &&
-                   d.pages.length <= 1 &&
-                   (d.pages.isEmpty || d.pages.first.objects.isEmpty),
-          ).toList();
-
-          if (starterNotes.length > 1) {
-            for (int i = 1; i < starterNotes.length; i++) {
-              final dup = starterNotes[i];
-              mergedDocs.remove(dup.id);
-              NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
-              firestoreService.deleteCanvasDoc(userId!, workspaceId, dup.id);
-            }
-          }
-        }
-
-        canvasDocs = mergedDocs.values.toList();
+        canvasDocs = _deduplicateStarterNotebooks(mergedDocs.values.toList(), workspaceId);
         final activeId = currentCanvasDoc?.id;
-        if (activeId != null && mergedDocs.containsKey(activeId)) {
-          currentCanvasDoc = mergedDocs[activeId];
+        if (activeId != null && canvasDocs.any((d) => d.id == activeId)) {
+          currentCanvasDoc = canvasDocs.firstWhere((d) => d.id == activeId);
         } else if (canvasDocs.isNotEmpty && currentCanvasDoc == null) {
           currentCanvasDoc = canvasDocs.first;
         }
@@ -1651,22 +1681,7 @@ class AppState extends ChangeNotifier {
         }
       } else if (canvasDocs.isNotEmpty) {
         // Cloud has no docs for this workspace yet, but local docs exist:
-        // Deduplicate if needed
-        if (canvasDocs.length > 1) {
-          final starterNotes = canvasDocs.where(
-            (d) => (d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1') &&
-                   d.pages.length <= 1 &&
-                   (d.pages.isEmpty || d.pages.first.objects.isEmpty),
-          ).toList();
-
-          if (starterNotes.length > 1) {
-            for (int i = 1; i < starterNotes.length; i++) {
-              final dup = starterNotes[i];
-              canvasDocs.removeWhere((d) => d.id == dup.id);
-              NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
-            }
-          }
-        }
+        canvasDocs = _deduplicateStarterNotebooks(canvasDocs, workspaceId);
 
         // Push local notebooks to Firestore so cloud database is populated
         for (final doc in canvasDocs) {
@@ -1690,8 +1705,10 @@ class AppState extends ChangeNotifier {
         canvasPaperStyle = CanvasPaperStyle.ruledLines;
         isPageViewMode = true;
         canvasObjects = [];
-        NotesLocalStorageService.saveDocLocally(defaultNotebook, userId: userId);
-        await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
+        if (userId != null && userId != 'local_user') {
+          NotesLocalStorageService.saveDocLocally(defaultNotebook, userId: userId);
+          await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
+        }
       }
       computeAccountStorage(forceCloudSync: true);
       notifyListeners();

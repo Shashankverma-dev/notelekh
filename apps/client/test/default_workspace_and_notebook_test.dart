@@ -83,5 +83,26 @@ void main() {
       expect(state.canvasDocs.length, equals(1));
       expect(state.canvasDocs.first.name, equals('Personal Notes'));
     });
+
+    test('selectWorkspace clears canvasDocs and isolates workspace documents', () async {
+      final state = AppState();
+      state.canvasDocs = [
+        CanvasDocModel(id: 'old_doc', workspaceId: 'old_ws', name: 'Old Notebook')
+      ];
+      expect(state.canvasDocs.length, equals(1));
+
+      final newWs = WorkspaceModel(
+        id: 'new_ws',
+        userId: 'test_user',
+        name: 'My Workspace',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      await state.selectWorkspace(newWs);
+      expect(state.currentWorkspace?.id, equals('new_ws'));
+      // The old notebook from old_ws must NOT be in state.canvasDocs
+      expect(state.canvasDocs.any((d) => d.id == 'old_doc'), isFalse);
+    });
   });
 }
