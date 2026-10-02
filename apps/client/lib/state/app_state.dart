@@ -527,7 +527,7 @@ class AppState extends ChangeNotifier {
       if (Firebase.apps.isNotEmpty) {
         debugPrint('[AUTH-INIT] A Firebase app already exists; continuing.');
       } else {
-        rethrow;
+        debugPrint('[AUTH-INIT] Continuing in offline/test mode without Firebase initialization.');
       }
     }
 
@@ -601,6 +601,7 @@ class AppState extends ChangeNotifier {
 
   /// Populate local state from an authenticated [User].
   void _applyFirebaseUser(User user) {
+    final bool isUserSwitch = (userId != user.uid);
     userId = user.uid;
     userEmail = user.email ?? '';
     final email = user.email;
@@ -615,7 +616,21 @@ class AppState extends ChangeNotifier {
     showLoginScreen = false;
     isAuthRestoring = false;
 
-    // Immediately provide a valid starter workspace so the workspace dashboard displays with zero delay
+    // Purge any stale/unauthenticated workspace & notebook state from memory on user switch
+    if (isUserSwitch) {
+      workspaces.clear();
+      currentWorkspace = null;
+      canvasDocs.clear();
+      currentCanvasDoc = null;
+      canvasObjects.clear();
+      conversations.clear();
+      currentConversation = null;
+      currentMessages.clear();
+      workspaceFiles.clear();
+      _noteTodos.clear();
+    }
+
+    // Immediately provide exactly 1 valid starter workspace so the workspace dashboard displays with zero delay
     if (workspaces.isEmpty) {
       final defaultWs = WorkspaceModel(
         id: 'default_${user.uid}',
@@ -630,6 +645,24 @@ class AppState extends ChangeNotifier {
       currentWorkspace = defaultWs;
     } else {
       currentWorkspace ??= workspaces.first;
+    }
+
+    // Immediately provide exactly 1 default notebook so the UI shows 1 notebook by default
+    if (canvasDocs.isEmpty && currentWorkspace != null) {
+      final defaultNotebook = CanvasDocModel(
+        id: 'notebook_${currentWorkspace!.id}_default',
+        workspaceId: currentWorkspace!.id,
+        name: 'Personal Notes',
+        docType: CanvasDocType.notebook,
+        coverColor: const Color(0xFF2E7D32),
+        coverEmoji: '📓',
+      );
+      canvasDocs = [defaultNotebook];
+      currentCanvasDoc = defaultNotebook;
+      currentPageIndex = 0;
+      canvasPaperStyle = CanvasPaperStyle.ruledLines;
+      isPageViewMode = true;
+      canvasObjects = [];
     }
   }
 
@@ -651,6 +684,7 @@ class AppState extends ChangeNotifier {
       final cUser = cred.user;
       if (cUser != null) {
         debugPrint('[AUTH-SIGNIN] Sign-in SUCCESS: UID=${cUser.uid}');
+        await resetWorkspace();
         _applyFirebaseUser(cUser);
         notifyListeners(); // Show workspace immediately — don't block on workspace load
         loadUserWorkspaces().catchError((e) {
@@ -724,6 +758,7 @@ class AppState extends ChangeNotifier {
             debugPrint('[AUTH-SIGNUP] updateDisplayName non-fatal error: $e');
           });
         }
+        await resetWorkspace();
         _applyFirebaseUser(cUser);
         if (name.trim().isNotEmpty) displayName = name.trim();
         notifyListeners(); // Show workspace immediately
@@ -859,6 +894,7 @@ class AppState extends ChangeNotifier {
       final user = credential.user;
       if (user != null) {
         debugPrint('[AUTH-GOOGLE] Popup sign-in SUCCESS: UID=${user.uid} (${user.email})');
+        await resetWorkspace();
         _applyFirebaseUser(user);
         notifyListeners(); // Directly transitions into ResponsiveShell (Workspace Dashboard)!
         loadUserWorkspaces().catchError((e) {
@@ -1041,6 +1077,7 @@ class AppState extends ChangeNotifier {
           if (redirectResult.user != null) {
             debugPrint('[AUTH-REDIRECT] Redirect completed: ${redirectResult.user!.email}');
             isAuthRestoring = false;
+            await resetWorkspace();
             _applyFirebaseUser(redirectResult.user!);
             notifyListeners(); // SHOW WORKSPACE IMMEDIATELY — ZERO DELAY!
             _startAuthListener();
@@ -1059,6 +1096,7 @@ class AppState extends ChangeNotifier {
       final existingUser = FirebaseAuth.instance.currentUser;
       if (existingUser != null) {
         debugPrint('[AUTH-STATE] Existing session active: ${existingUser.email}');
+        await resetWorkspace();
         _applyFirebaseUser(existingUser);
         isAuthRestoring = false;
         notifyListeners(); // SHOW WORKSPACE IMMEDIATELY — ZERO DELAY!
@@ -1082,9 +1120,11 @@ class AppState extends ChangeNotifier {
       isAuthRestoring = false;
     }
 
-    loadUserWorkspaces().catchError((e) {
-      debugPrint('[AUTH-STATE] Background initial workspace load: $e');
-    });
+    if (isAuthenticated) {
+      loadUserWorkspaces().catchError((e) {
+        debugPrint('[AUTH-STATE] Background initial workspace load: $e');
+      });
+    }
     notifyListeners();
   }
 
@@ -1130,7 +1170,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> loadUserWorkspaces() async {
     _syncCurrentPageObjects();
-    if (currentCanvasDoc != null) {
+    if (currentCanvasDoc != null && userId != null && userId != 'local_user' && !currentCanvasDoc!.id.startsWith('notebook_default_')) {
       NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
     }
 
@@ -1139,15 +1179,13 @@ class AppState extends ChangeNotifier {
       if (workspaces.isNotEmpty) {
         await selectWorkspace(workspaces.first);
       } else {
-        // Create initial starter workspace for this user
-        final newWs = await createWorkspace(
+        // Create initial starter workspace for this user (exactly 1 workspace)
+        await createWorkspace(
           name: 'My Workspace',
           description: 'Personal notes & workspace',
           icon: 'book',
         );
-        if (newWs != null) {
-          await selectWorkspace(newWs);
-        }
+        // Note: createWorkspace already calls selectWorkspace(ws) internally!
       }
     } catch (e) {
       debugPrint('Error loading workspaces: $e');
@@ -1227,6 +1265,8 @@ class AppState extends ChangeNotifier {
         description: description,
         icon: icon,
       );
+      // Remove any temporary unpersisted starter workspace (e.g. 'default_${user.uid}')
+      workspaces.removeWhere((w) => w.id.startsWith('default_'));
       workspaces.insert(0, ws);
       await selectWorkspace(ws);
       return ws;
@@ -1461,14 +1501,46 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ================= CANVAS ENGINE & GOODNOTES NOTEBOOK/PAGE SYSTEM =================
+  // In-flight fetch map to prevent duplicate concurrent fetch calls on the same workspace
+  final Map<String, Future<void>> _inFlightCanvasDocFetches = {};
+
   Future<void> fetchWorkspaceCanvasDocs(String workspaceId) async {
+    if (_inFlightCanvasDocFetches.containsKey(workspaceId)) {
+      return _inFlightCanvasDocFetches[workspaceId];
+    }
+    final future = _doFetchWorkspaceCanvasDocs(workspaceId);
+    _inFlightCanvasDocFetches[workspaceId] = future;
+    try {
+      await future;
+    } finally {
+      _inFlightCanvasDocFetches.remove(workspaceId);
+    }
+  }
+
+  Future<void> _doFetchWorkspaceCanvasDocs(String workspaceId) async {
     // 1. Immediately hydrate from local storage for this specific workspace
     try {
       final wsLocalDocs = await NotesLocalStorageService.loadDocsForWorkspace(workspaceId, userId: userId);
-      canvasDocs = wsLocalDocs;
-      
+
+      // Deduplicate any empty starter notes locally if duplicates were previously stored
+      if (wsLocalDocs.length > 1) {
+        final starterNotes = wsLocalDocs.where(
+          (d) => (d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1') &&
+                 d.pages.length <= 1 &&
+                 (d.pages.isEmpty || d.pages.first.objects.isEmpty),
+        ).toList();
+
+        if (starterNotes.length > 1) {
+          for (int i = 1; i < starterNotes.length; i++) {
+            final dup = starterNotes[i];
+            wsLocalDocs.removeWhere((d) => d.id == dup.id);
+            NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
+          }
+        }
+      }
+
       if (wsLocalDocs.isNotEmpty) {
+        canvasDocs = wsLocalDocs;
         if (accountItemCount < wsLocalDocs.length) {
           accountItemCount = wsLocalDocs.length;
         }
@@ -1481,9 +1553,6 @@ class AppState extends ChangeNotifier {
         canvasPaperStyle = currentCanvasDoc!.activePage.paperStyle;
         canvasObjects = List.from(currentCanvasDoc!.activePage.objects);
         isPageViewMode = currentCanvasDoc!.docType != CanvasDocType.canvas;
-      } else {
-        currentCanvasDoc = null;
-        canvasObjects = [];
       }
       notifyListeners();
     } catch (e) {
@@ -1492,6 +1561,7 @@ class AppState extends ChangeNotifier {
 
     // 2. Intelligent zero-data-loss cloud merge in background
     try {
+      if (userId == null) return;
       final cloudDocs = await firestoreService.getWorkspaceCanvasDocs(userId!, workspaceId);
       if (cloudDocs.isNotEmpty) {
         // Synchronize in-memory changes to current active doc first
@@ -1535,6 +1605,24 @@ class AppState extends ChangeNotifier {
           }
         }
 
+        // Deduplicate duplicate starter notes if duplicate "Personal Notes" were previously created
+        if (mergedDocs.length > 1) {
+          final starterNotes = mergedDocs.values.where(
+            (d) => (d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1') &&
+                   d.pages.length <= 1 &&
+                   (d.pages.isEmpty || d.pages.first.objects.isEmpty),
+          ).toList();
+
+          if (starterNotes.length > 1) {
+            for (int i = 1; i < starterNotes.length; i++) {
+              final dup = starterNotes[i];
+              mergedDocs.remove(dup.id);
+              NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
+              firestoreService.deleteCanvasDoc(userId!, workspaceId, dup.id);
+            }
+          }
+        }
+
         canvasDocs = mergedDocs.values.toList();
         final activeId = currentCanvasDoc?.id;
         if (activeId != null && mergedDocs.containsKey(activeId)) {
@@ -1559,27 +1647,42 @@ class AppState extends ChangeNotifier {
         // Ensure all documents in this workspace are cached locally and synced to cloud
         for (final doc in canvasDocs) {
           NotesLocalStorageService.saveDocLocally(doc, userId: userId);
-          if (userId != null) {
-            firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
-          }
+          firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
         }
       } else if (canvasDocs.isNotEmpty) {
         // Cloud has no docs for this workspace yet, but local docs exist:
-        // Push every local notebook to Firestore so cloud database is populated!
-        for (final doc in canvasDocs) {
-          NotesLocalStorageService.saveDocLocally(doc, userId: userId);
-          if (userId != null) {
-            await firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+        // Deduplicate if needed
+        if (canvasDocs.length > 1) {
+          final starterNotes = canvasDocs.where(
+            (d) => (d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1') &&
+                   d.pages.length <= 1 &&
+                   (d.pages.isEmpty || d.pages.first.objects.isEmpty),
+          ).toList();
+
+          if (starterNotes.length > 1) {
+            for (int i = 1; i < starterNotes.length; i++) {
+              final dup = starterNotes[i];
+              canvasDocs.removeWhere((d) => d.id == dup.id);
+              NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
+            }
           }
         }
+
+        // Push local notebooks to Firestore so cloud database is populated
+        for (final doc in canvasDocs) {
+          NotesLocalStorageService.saveDocLocally(doc, userId: userId);
+          await firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+        }
       } else {
-        // Both cloud and local are empty: create default notebook 'Personal Notes'
-        final cleanId = workspaceId.replaceAll(RegExp(r'[^\w]'), '');
-        final prefix = cleanId.length > 6 ? cleanId.substring(0, 6) : cleanId;
+        // Both cloud and local are empty: create EXACTLY 1 default notebook 'Personal Notes'
+        final defaultNotebookId = 'notebook_${workspaceId}_default';
         final defaultNotebook = CanvasDocModel(
-          id: 'notebook-$prefix-${DateTime.now().millisecondsSinceEpoch}',
+          id: defaultNotebookId,
           workspaceId: workspaceId,
           name: 'Personal Notes',
+          docType: CanvasDocType.notebook,
+          coverColor: const Color(0xFF2E7D32),
+          coverEmoji: '📓',
         );
         canvasDocs = [defaultNotebook];
         currentCanvasDoc = defaultNotebook;
@@ -1588,9 +1691,7 @@ class AppState extends ChangeNotifier {
         isPageViewMode = true;
         canvasObjects = [];
         NotesLocalStorageService.saveDocLocally(defaultNotebook, userId: userId);
-        if (userId != null) {
-          await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
-        }
+        await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
       }
       computeAccountStorage(forceCloudSync: true);
       notifyListeners();

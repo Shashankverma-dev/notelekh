@@ -1,3 +1,4 @@
+// ignore_for_file: avoid_unnecessary_containers
 import 'dart:ui';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
