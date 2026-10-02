@@ -144,6 +144,44 @@ class FirestoreService {
     }
   }
 
+  /// Real-time live synchronization stream for all canvas documents in a workspace.
+  /// Allows other devices with the same user ID to immediately receive live changes.
+  Stream<List<CanvasDocModel>> streamWorkspaceCanvasDocs(String userId, String workspaceId) {
+    return _db
+        .collection('users')
+        .doc(userId)
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('canvas_docs')
+        .snapshots()
+        .map((snapshot) {
+          final list = snapshot.docs.map((doc) {
+            final data = _normalizeTimestamps(doc.data());
+            data['id'] = doc.id;
+            return CanvasDocModel.fromJson(data);
+          }).toList();
+          return list;
+        });
+  }
+
+  /// Real-time live synchronization stream for a single active canvas notebook.
+  Stream<CanvasDocModel?> streamCanvasDoc(String userId, String workspaceId, String docId) {
+    return _db
+        .collection('users')
+        .doc(userId)
+        .collection('workspaces')
+        .doc(workspaceId)
+        .collection('canvas_docs')
+        .doc(docId)
+        .snapshots()
+        .map((snapshot) {
+          if (!snapshot.exists || snapshot.data() == null) return null;
+          final data = _normalizeTimestamps(snapshot.data()!);
+          data['id'] = snapshot.id;
+          return CanvasDocModel.fromJson(data);
+        });
+  }
+
   Future<void> saveCanvasDoc(String userId, String workspaceId, CanvasDocModel doc) async {
     try {
       final data = doc.toJson();

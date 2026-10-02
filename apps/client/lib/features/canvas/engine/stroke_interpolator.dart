@@ -5,8 +5,12 @@ import 'package:ai_workspace_client/features/canvas/models/stroke_point.dart';
 class StrokeInterpolator {
   /// Interpolates smooth curve points between raw sampled points.
   /// Uses adaptive segment calculation based on point-to-point distance.
-  static List<StrokePoint> interpolate(List<StrokePoint> points, {int defaultSegments = 6}) {
+  static List<StrokePoint> interpolate(List<StrokePoint> points, {int defaultSegments = 2}) {
     if (points.length < 2) return points;
+    // Fast path: if the stroke is already densely sampled (e.g. rapid stylus/mouse movement),
+    // StrokeRenderer already computes smooth quadratic Béziers between consecutive points.
+    // Multiplying points further causes severe GC pauses and freezes during continuous writing.
+    if (points.length >= 35) return points;
 
     final result = <StrokePoint>[];
 
@@ -25,9 +29,9 @@ class StrokeInterpolator {
 
       int segments = defaultSegments;
       if (dist < 16) {
-        segments = 2; // Very short movement
+        segments = 1; // Very short movement: no extra sub-points needed
       } else if (dist > 400) {
-        segments = 10; // Large fast jump
+        segments = 3; // Fast movement: smooth with max 3 sub-points (never 10x explosion)
       }
 
       for (int j = 1; j <= segments; j++) {

@@ -776,13 +776,12 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       tipSharpness: _drawingState.tipSharpness,
       tipFlatness: _drawingState.tipFlatness,
     );
-    if (stroke.points.length > 2) {
-      stroke.cachedInterpolatedPoints = StrokeInterpolator.interpolate(stroke.points, defaultSegments: 4);
+    if (stroke.points.length > 2 && stroke.points.length < 35) {
+      stroke.cachedInterpolatedPoints = StrokeInterpolator.interpolate(stroke.points, defaultSegments: 2);
     }
-    widget.state.addCanvasObject(stroke);
     _currentStrokePoints = [];
     _drawingState.liveStrokeNotifier.clear();
-    if (mounted) setState(() {});
+    widget.state.addCanvasObject(stroke);
   }
 
 
@@ -7160,7 +7159,27 @@ class CanvasPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CanvasPainter old) => true;
+  bool shouldRepaint(covariant CanvasPainter old) {
+    return old.objects.length != objects.length ||
+        !identical(old.objects, objects) ||
+        old.activePageIndex != activePageIndex ||
+        old.panOffset != panOffset ||
+        old.zoomScale != zoomScale ||
+        old.isDark != isDark ||
+        old.paperStyle != paperStyle ||
+        old.isPageViewMode != isPageViewMode ||
+        old.sheetPullOffset != sheetPullOffset ||
+        old.isTransitioning != isTransitioning ||
+        old.transitionProgress != transitionProgress ||
+        old.dragStart != dragStart ||
+        old.dragCurrent != dragCurrent ||
+        old.lassoPoints.length != lassoPoints.length ||
+        old.selectedTextItemId != selectedTextItemId ||
+        old.editingExistingTextId != editingExistingTextId ||
+        old.isDrawingTape != isDrawingTape ||
+        old.tapeCurrentWorld != tapeCurrentWorld ||
+        old.currentTool != currentTool;
+  }
 }
 
 class _LaserPoint {

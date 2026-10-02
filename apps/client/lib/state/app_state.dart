@@ -498,6 +498,7 @@ class AppState extends ChangeNotifier {
   // ================== FIREBASE AUTH ==================
 
   StreamSubscription<User?>? _authStateSubscription;
+  StreamSubscription<List<CanvasDocModel>>? _canvasDocsSubscription;
   static Future<void>? _firebaseInitFuture;
   bool _isGoogleAuthInFlight = false;
 
@@ -1001,6 +1002,8 @@ class AppState extends ChangeNotifier {
     try {
       await FirebaseAuth.instance.signOut();
     } catch (_) {}
+    _canvasDocsSubscription?.cancel();
+    _canvasDocsSubscription = null;
     isAuthenticated = false;
     showLoginScreen = false;
     isAuthRestoring = false;
@@ -1117,6 +1120,8 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> resetWorkspace() async {
+    _canvasDocsSubscription?.cancel();
+    _canvasDocsSubscription = null;
     workspaces.clear();
     currentWorkspace = null;
     conversations.clear();
@@ -1360,6 +1365,8 @@ class AppState extends ChangeNotifier {
 
 
   Future<void> selectWorkspace(WorkspaceModel ws) async {
+    _canvasDocsSubscription?.cancel();
+    _canvasDocsSubscription = null;
     _syncCurrentPageObjects();
     if (currentCanvasDoc != null && userId != null && userId != 'local_user' && !currentCanvasDoc!.id.startsWith('notebook_default_')) {
       NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
@@ -1615,11 +1622,13 @@ class AppState extends ChangeNotifier {
         // Synchronize in-memory changes to current active doc first
         _syncCurrentPageObjects();
 
-        // Build a merged document list: local docs always preserve user drawings
+        // Build a merged document list: newer documents (by updated_at timestamp or content) win
         final Map<String, CanvasDocModel> mergedDocs = {};
         for (final localDoc in canvasDocs) {
           mergedDocs[localDoc.id] = localDoc;
         }
+
+        final Set<String> docsNeedingCloudPush = {};
 
         for (final cloudDoc in cloudDocs) {
           final localDoc = mergedDocs[cloudDoc.id];
@@ -1628,28 +1637,33 @@ class AppState extends ChangeNotifier {
             mergedDocs[cloudDoc.id] = cloudDoc;
           } else {
             // Document exists both locally and in cloud!
-            // CRITICAL ZERO-DATA-LOSS MERGE:
-            // Ensure every page with user drawings is strictly preserved.
-            final List<CanvasPage> resolvedPages = [];
-            final maxPages = math.max(localDoc.pages.length, cloudDoc.pages.length);
-            for (int i = 0; i < maxPages; i++) {
-              final localPage = (i < localDoc.pages.length) ? localDoc.pages[i] : null;
-              final cloudPage = (i < cloudDoc.pages.length) ? cloudDoc.pages[i] : null;
+            // CRITICAL MULTI-DEVICE MERGE: Compare timestamps and object counts
+            final cloudUpdated = cloudDoc.updatedAt;
+            final localUpdated = localDoc.updatedAt;
+            final cloudObjCount = cloudDoc.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
+            final localObjCount = localDoc.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
 
-              if (localPage != null && cloudPage != null) {
-                // If local page has objects or cloud has none, keep local drawings!
-                if (localPage.objects.isNotEmpty || cloudPage.objects.isEmpty) {
-                  resolvedPages.add(localPage);
-                } else {
-                  resolvedPages.add(cloudPage);
-                }
-              } else if (localPage != null) {
-                resolvedPages.add(localPage);
-              } else if (cloudPage != null) {
-                resolvedPages.add(cloudPage);
+            bool cloudWins = false;
+            if (cloudUpdated != null && localUpdated != null) {
+              if (cloudUpdated.isAfter(localUpdated)) {
+                cloudWins = true;
+              } else if (localUpdated.isAfter(cloudUpdated)) {
+                cloudWins = false;
+                docsNeedingCloudPush.add(localDoc.id);
+              } else {
+                cloudWins = cloudObjCount >= localObjCount;
+                if (!cloudWins) docsNeedingCloudPush.add(localDoc.id);
               }
+            } else {
+              cloudWins = cloudObjCount >= localObjCount;
+              if (!cloudWins) docsNeedingCloudPush.add(localDoc.id);
             }
-            localDoc.pages = resolvedPages;
+
+            if (cloudWins) {
+              mergedDocs[cloudDoc.id] = cloudDoc;
+            } else {
+              mergedDocs[cloudDoc.id] = localDoc;
+            }
           }
         }
 
@@ -1669,15 +1683,20 @@ class AppState extends ChangeNotifier {
           canvasObjects = List.from(currentCanvasDoc!.activePage.objects);
           isPageViewMode = currentCanvasDoc!.docType != CanvasDocType.canvas;
 
-          // Save authoritative merged state to local storage and sync
+          // Save authoritative merged state to local storage
           NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
-          _debounceSyncCanvas();
         }
 
-        // Ensure all documents in this workspace are cached locally and synced to cloud
+        // Cache all merged documents locally
         for (final doc in canvasDocs) {
           NotesLocalStorageService.saveDocLocally(doc, userId: userId);
-          firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+        }
+
+        // ONLY push docs that had newer un-pushed local offline changes
+        for (final doc in canvasDocs) {
+          if (docsNeedingCloudPush.contains(doc.id)) {
+            firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+          }
         }
       } else if (canvasDocs.isNotEmpty) {
         // Cloud has no docs for this workspace yet, but local docs exist:
@@ -1710,10 +1729,89 @@ class AppState extends ChangeNotifier {
           await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
         }
       }
+
+      // 3. Establish real-time live synchronization stream for this workspace
+      _canvasDocsSubscription?.cancel();
+      if (userId != null && userId != 'local_user' && !userId!.startsWith('guest_')) {
+        _canvasDocsSubscription = firestoreService
+            .streamWorkspaceCanvasDocs(userId!, workspaceId)
+            .listen((liveCloudDocs) {
+              _handleLiveCloudDocs(liveCloudDocs, workspaceId);
+            }, onError: (e) {
+              debugPrint('[LIVE-SYNC] Stream error: $e');
+            });
+      }
+
       computeAccountStorage(forceCloudSync: true);
       notifyListeners();
     } catch (e) {
       debugPrint('Error fetching canvas docs from cloud: $e');
+    }
+  }
+
+  /// Handles incoming real-time Firestore snapshots for multi-device sync
+  void _handleLiveCloudDocs(List<CanvasDocModel> liveDocs, String workspaceId) {
+    if (currentWorkspace?.id != workspaceId) return;
+    if (userId == null || userId == 'local_user' || userId!.startsWith('guest_')) return;
+    if (liveDocs.isEmpty && canvasDocs.isNotEmpty) return;
+
+    bool hasAnyChange = false;
+    final Map<String, CanvasDocModel> docMap = {for (var d in canvasDocs) d.id: d};
+
+    for (final liveDoc in liveDocs) {
+      final local = docMap[liveDoc.id];
+      if (local == null) {
+        // Document created on another device
+        canvasDocs.add(liveDoc);
+        docMap[liveDoc.id] = liveDoc;
+        NotesLocalStorageService.saveDocLocally(liveDoc, userId: userId);
+        hasAnyChange = true;
+      } else {
+        // Check if incoming liveDoc is newer than what we currently have
+        final liveUpdated = liveDoc.updatedAt;
+        final localUpdated = local.updatedAt;
+        final liveObjCount = liveDoc.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
+        final localObjCount = local.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
+
+        bool isLiveNewer = false;
+        if (liveUpdated != null && localUpdated != null) {
+          isLiveNewer = liveUpdated.isAfter(localUpdated);
+        } else {
+          isLiveNewer = liveObjCount != localObjCount;
+        }
+
+        if (isLiveNewer) {
+          // If user on this device is actively drawing a stroke right at this millisecond,
+          // do not interrupt their in-flight stroke.
+          final isActivelyDrawingThisDoc = (currentCanvasDoc?.id == liveDoc.id) &&
+              (_canvasSyncTimer?.isActive == true || _localSaveTimer?.isActive == true);
+          if (isActivelyDrawingThisDoc) {
+            continue;
+          }
+
+          final idx = canvasDocs.indexWhere((d) => d.id == liveDoc.id);
+          if (idx != -1) {
+            canvasDocs[idx] = liveDoc;
+          }
+          docMap[liveDoc.id] = liveDoc;
+          NotesLocalStorageService.saveDocLocally(liveDoc, userId: userId);
+
+          if (currentCanvasDoc?.id == liveDoc.id) {
+            currentCanvasDoc = liveDoc;
+            final clamped = currentPageIndex.clamp(0, liveDoc.pages.length - 1);
+            currentPageIndex = clamped;
+            canvasPaperStyle = liveDoc.pages[clamped].paperStyle;
+            canvasObjects = List.from(liveDoc.pages[clamped].objects);
+            isPageViewMode = liveDoc.docType != CanvasDocType.canvas;
+          }
+          hasAnyChange = true;
+        }
+      }
+    }
+
+    if (hasAnyChange) {
+      computeAccountStorage(forceCloudSync: false);
+      notifyListeners();
     }
   }
 
@@ -2321,17 +2419,16 @@ class AppState extends ChangeNotifier {
   void addCanvasObject(CanvasObjectItem obj) {
     _pushUndo();
     canvasObjects = [...canvasObjects, obj];
-    // _syncCurrentPageObjects() and notifyListeners() are handled by the _debouncePersist or caller, 
-    // but wait, if it's not handled, we should do it once.
-    // The report said: 3 notifyListeners + 2 syncs.
+    currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
     notifyListeners();
-    _debouncePersist(); // Let's hope this doesn't do it again
+    _debouncePersist();
   }
 
   void removeCanvasObject(CanvasObjectItem obj) {
     _pushUndo();
     canvasObjects = canvasObjects.where((o) => o.id != obj.id).toList();
+    currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
     notifyListeners();
     _debouncePersist();
@@ -2340,6 +2437,7 @@ class AppState extends ChangeNotifier {
   void setCanvasObjects(List<CanvasObjectItem> newObjects, {bool pushUndo = true, bool isLiveSession = false}) {
     if (pushUndo) _pushUndo();
     canvasObjects = List.from(newObjects);
+    currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
     notifyListeners();
     if (!isLiveSession) {
@@ -2352,6 +2450,7 @@ class AppState extends ChangeNotifier {
     if (index != -1) {
       _pushUndo();
       canvasObjects[index] = updatedObj;
+      currentCanvasDoc?.updatedAt = DateTime.now();
       _syncCurrentPageObjects();
       notifyListeners();
       _debouncePersist();
@@ -2384,20 +2483,28 @@ class AppState extends ChangeNotifier {
     _pushUndo();
     canvasObjects.clear();
     selectedCanvasObjects.clear();
+    currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
     notifyListeners();
     _debouncePersist();
   }
 
   void _pushUndo() {
+    if (undoStack.length >= 30) {
+      undoStack.removeAt(0);
+    }
     undoStack.add(List.from(canvasObjects));
     redoStack.clear();
   }
 
   void undo() {
     if (undoStack.isNotEmpty) {
+      if (redoStack.length >= 30) {
+        redoStack.removeAt(0);
+      }
       redoStack.add(List.from(canvasObjects));
       canvasObjects = undoStack.removeLast();
+      currentCanvasDoc?.updatedAt = DateTime.now();
       _syncCurrentPageObjects();
       notifyListeners();
       _debounceSyncCanvas();
@@ -2406,8 +2513,12 @@ class AppState extends ChangeNotifier {
 
   void redo() {
     if (redoStack.isNotEmpty) {
+      if (undoStack.length >= 30) {
+        undoStack.removeAt(0);
+      }
       undoStack.add(List.from(canvasObjects));
       canvasObjects = redoStack.removeLast();
+      currentCanvasDoc?.updatedAt = DateTime.now();
       _syncCurrentPageObjects();
       notifyListeners();
       _debounceSyncCanvas();
@@ -2496,30 +2607,32 @@ class AppState extends ChangeNotifier {
   Timer? _canvasSyncTimer;
   Timer? _localSaveTimer;
 
-  /// Debounced persistence: local save after 300ms idle, cloud sync after 800ms idle.
-  /// Prevents I/O spam during rapid drawing while guaranteeing no data loss.
+  /// Debounced persistence: local save after 600ms idle, cloud sync after 1200ms idle.
+  /// Prevents I/O spam during rapid drawing while guaranteeing zero data loss.
   void _debouncePersist() {
-    // Debounced local save — fires after 300ms of no new strokes
+    // Debounced local save — fires after 600ms of no new strokes
     _localSaveTimer?.cancel();
-    _localSaveTimer = Timer(const Duration(milliseconds: 300), () {
+    _localSaveTimer = Timer(const Duration(milliseconds: 600), () {
       _syncCurrentPageObjects();
       if (currentCanvasDoc != null) {
+        currentCanvasDoc!.updatedAt = DateTime.now();
         NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
         NotesLocalStorageService.saveActiveDocId(currentCanvasDoc!.id, userId: userId);
       }
     });
 
-    // Debounced cloud sync — fires after 800ms of no new strokes
+    // Debounced cloud sync — fires after 1200ms of no new strokes
     _canvasSyncTimer?.cancel();
     if (autosaveStatus != 'saving') {
       autosaveStatus = 'saving';
       // Don't notifyListeners here — avoid unnecessary rebuild during active drawing
     }
-    _canvasSyncTimer = Timer(const Duration(milliseconds: 800), () async {
+    _canvasSyncTimer = Timer(const Duration(milliseconds: 1200), () async {
       // Ensure local save completed first
       _localSaveTimer?.cancel();
       _syncCurrentPageObjects();
       if (currentCanvasDoc != null) {
+        currentCanvasDoc!.updatedAt = DateTime.now();
         NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
         NotesLocalStorageService.saveActiveDocId(currentCanvasDoc!.id, userId: userId);
       }
@@ -2543,6 +2656,7 @@ class AppState extends ChangeNotifier {
   void _debounceSyncCanvas() {
     _syncCurrentPageObjects();
     if (currentCanvasDoc != null) {
+      currentCanvasDoc!.updatedAt = DateTime.now();
       NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
       NotesLocalStorageService.saveActiveDocId(currentCanvasDoc!.id, userId: userId);
     }

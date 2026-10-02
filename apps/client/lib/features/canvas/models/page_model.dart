@@ -132,6 +132,7 @@ class CanvasDocModel {
   /// pattern:  'grid' | 'dots' | 'stripes' | 'waves' | 'linen' | 'leather'
   /// solid:    ''
   String coverStyleData;
+  DateTime? updatedAt;
 
   CanvasDocModel({
     required this.id,
@@ -146,6 +147,7 @@ class CanvasDocModel {
     this.coverEmoji = '📓',
     this.coverStyle = 'solid',
     this.coverStyleData = '',
+    this.updatedAt,
   }) : pages = pages ??
             (objects != null && objects.isNotEmpty
                 ? [
@@ -237,6 +239,12 @@ class CanvasDocModel {
       } catch (_) {}
     }
 
+    DateTime? updatedAt;
+    final rawUpdatedAt = json['updated_at'];
+    if (rawUpdatedAt is String) {
+      updatedAt = DateTime.tryParse(rawUpdatedAt);
+    }
+
     return CanvasDocModel(
       id: json['id'] as String,
       workspaceId: json['workspace_id'] as String? ?? 'default',
@@ -249,6 +257,7 @@ class CanvasDocModel {
       coverEmoji: json['cover_emoji'] as String? ?? '📓',
       coverStyle: json['cover_style'] as String? ?? 'solid',
       coverStyleData: json['cover_style_data'] as String? ?? '',
+      updatedAt: updatedAt ?? DateTime.now(),
     );
   }
 
@@ -266,6 +275,7 @@ class CanvasDocModel {
       'cover_emoji': coverEmoji,
       'cover_style': coverStyle,
       'cover_style_data': coverStyleData,
+      'updated_at': (updatedAt ?? DateTime.now()).toIso8601String(),
       'pages': pages.map((p) => p.toJson()).toList(),
       'objects': objects.map((o) => o.toJson()).toList(),
     };
