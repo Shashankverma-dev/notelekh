@@ -921,8 +921,52 @@ class _HeroSection extends StatelessWidget {
   }
 
   Widget _platformSyncBar() {
+    if (!isDesktop) {
+      return Container(
+        margin: const EdgeInsets.only(top: 36),
+        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+        decoration: const BoxDecoration(
+          border: Border(top: BorderSide(color: Color(0xFFF1F5F9), width: 1.5)),
+        ),
+        child: Column(
+          children: [
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 24,
+              runSpacing: 16,
+              children: [
+                _platformItem(const _IpadVectorIcon(), 'iPad'),
+                _platformItem(const _MacVectorIcon(), 'Mac'),
+                _platformItem(const _WindowsVectorIcon(), 'Windows'),
+                _platformItem(const _AndroidVectorIcon(), 'Android'),
+                _platformItem(const _WebVectorIcon(), 'Web'),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Container(width: 24, height: 1, color: const Color(0xFFCBD5E1)),
+                const SizedBox(width: 12),
+                Text(
+                  'Sync everywhere · Always with you',
+                  style: GoogleFonts.inter(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: const Color(0xFF64748B),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Container(width: 24, height: 1, color: const Color(0xFFCBD5E1)),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
-      margin: EdgeInsets.only(top: isDesktop ? 60 : 40),
+      margin: const EdgeInsets.only(top: 60),
       padding: const EdgeInsets.only(top: 32),
       decoration: const BoxDecoration(
         border: Border(top: BorderSide(color: Color(0xFFF1F5F9), width: 1.5)),
@@ -3896,7 +3940,7 @@ class _AiMockup extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════════
 class _UseCasesSection extends StatefulWidget {
   final bool isDesktop;
-  const _UseCasesSection({super.key, required this.isDesktop});
+  const _UseCasesSection({required this.isDesktop});
 
   @override
   State<_UseCasesSection> createState() => _UseCasesSectionState();
@@ -5052,7 +5096,7 @@ class _PersonaThinkerPainter extends CustomPainter {
 // ═══════════════════════════════════════════════════════════════════════════════
 class _WorkflowsSection extends StatelessWidget {
   final bool isDesktop;
-  const _WorkflowsSection({super.key, required this.isDesktop});
+  const _WorkflowsSection({required this.isDesktop});
 
   Widget _buildCapturePreview(Color accent) {
     return Container(
@@ -6085,8 +6129,10 @@ class _FooterSectionState extends State<_FooterSection> {
               spacing: 20,
               runSpacing: 14,
               children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     Text(
                       '© 2026 Notelekh, Inc. All rights reserved.',
@@ -6096,7 +6142,6 @@ class _FooterSectionState extends State<_FooterSection> {
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(width: 8),
                     Text(
                       '·  Crafted for curious minds worldwide.',
                       style: GoogleFonts.inter(
@@ -6128,12 +6173,14 @@ class _FooterSectionState extends State<_FooterSection> {
           children: [
             const Icon(Icons.check_circle_rounded, color: Color(0xFF16A34A), size: 18),
             const SizedBox(width: 8),
-            Text(
-              'You’re on the list! Welcome aboard.',
-              style: GoogleFonts.inter(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: const Color(0xFF15803D),
+            Flexible(
+              child: Text(
+                'You’re on the list! Welcome aboard.',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: const Color(0xFF15803D),
+                ),
               ),
             ),
           ],
@@ -6141,11 +6188,12 @@ class _FooterSectionState extends State<_FooterSection> {
       );
     }
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 250,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isNarrow = constraints.maxWidth < 390;
+
+        final inputField = Container(
+          width: isNarrow ? double.infinity : 250,
           height: 44,
           padding: const EdgeInsets.symmetric(horizontal: 14),
           decoration: BoxDecoration(
@@ -6166,9 +6214,9 @@ class _FooterSectionState extends State<_FooterSection> {
             ),
             onSubmitted: (_) => _handleSubscribe(),
           ),
-        ),
-        const SizedBox(width: 10),
-        MouseRegion(
+        );
+
+        final submitBtn = MouseRegion(
           cursor: SystemMouseCursors.click,
           child: GestureDetector(
             onTap: _handleSubscribe,
@@ -6190,6 +6238,8 @@ class _FooterSectionState extends State<_FooterSection> {
               ),
               alignment: Alignment.center,
               child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: isNarrow ? MainAxisSize.max : MainAxisSize.min,
                 children: [
                   Text(
                     'Subscribe',
@@ -6205,8 +6255,28 @@ class _FooterSectionState extends State<_FooterSection> {
               ),
             ),
           ),
-        ),
-      ],
+        );
+
+        if (isNarrow) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              inputField,
+              const SizedBox(height: 10),
+              submitBtn,
+            ],
+          );
+        }
+
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            inputField,
+            const SizedBox(width: 10),
+            submitBtn,
+          ],
+        );
+      },
     );
   }
 

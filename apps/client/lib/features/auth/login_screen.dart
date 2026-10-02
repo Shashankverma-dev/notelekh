@@ -192,6 +192,9 @@ class _LoginScreenState extends State<LoginScreen>
 
   @override
   Widget build(BuildContext context) {
+    final size = MediaQuery.of(context).size;
+    final isSmall = size.width < 480;
+
     return Scaffold(
       backgroundColor: _bgCanvas,
       body: Stack(
@@ -205,84 +208,89 @@ class _LoginScreenState extends State<LoginScreen>
             ),
           ),
 
-          // Top Header Bar
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Back to home
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        onTap: widget.state.navigateToLanding,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: _borderDefault),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.arrow_back_rounded, size: 15, color: _inkSecondary),
-                              const SizedBox(width: 6),
-                              Text(
-                                'Notelekh',
-                                style: GoogleFonts.inter(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: _inkSecondary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    // Helpful reference link
-                    MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        onTap: widget.state.navigateToLanding,
-                        child: Text(
-                          'Need help?',
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: _inkSecondary,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-
-          // Main Centered Content (Zero Cards, Balanced, Breathing room)
           SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 60),
-                child: FadeTransition(
-                  opacity: _fadeAnim,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 390),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        // Brand Logo & Title
-                        Center(
+            child: Column(
+              children: [
+                // Top Navigation Bar (Always visible, non-overlapping)
+                Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: isSmall ? 16 : 28,
+                    vertical: isSmall ? 12 : 18,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      // Back to home
+                      MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          onTap: widget.state.navigateToLanding,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: _borderDefault),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.arrow_back_rounded, size: 15, color: _inkSecondary),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Notelekh',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: _inkSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      // Helpful reference link
+                      MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          onTap: widget.state.navigateToLanding,
+                          child: Text(
+                            'Need help?',
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                              color: _inkSecondary,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Main Centered Content (Zero Cards, Balanced, Breathing room)
+                Expanded(
+                  child: Center(
+                    child: SingleChildScrollView(
+                      physics: const ClampingScrollPhysics(),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isSmall ? 16 : 24,
+                        vertical: isSmall ? 14 : 32,
+                      ),
+                      child: FadeTransition(
+                        opacity: _fadeAnim,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(
+                            maxWidth: 390.0,
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // Brand Logo & Title
+                              Center(
                           child: Column(
                             children: [
                               const NotelekhIcon(size: 44),
@@ -524,20 +532,23 @@ class _LoginScreenState extends State<LoginScreen>
 
                         // Humanized, subtle craft note (Like Goodnotes)
                         Center(
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.edit_note_rounded, size: 16, color: _inkMuted),
-                              const SizedBox(width: 6),
-                              Text(
-                                'Crafted for stylus, pencil, and keyboard',
-                                style: GoogleFonts.inter(
-                                  fontSize: 12,
-                                  color: _inkMuted,
-                                  fontWeight: FontWeight.w500,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.edit_note_rounded, size: 16, color: _inkMuted),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Crafted for stylus, pencil, and keyboard',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    color: _inkMuted,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                         ),
                         const SizedBox(height: 8),
@@ -560,8 +571,11 @@ class _LoginScreenState extends State<LoginScreen>
           ),
         ],
       ),
-    );
-  }
+    ),
+  ],
+),
+);
+}
 
   static Widget _fieldLabel(String label) => Text(
         label,

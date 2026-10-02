@@ -47,248 +47,270 @@ class _UnifiedStudioScreenState extends State<UnifiedStudioScreen>
         children: [
           // ── Studio Top Header (Hidden in canvasOnly mode to avoid duplicate header & maximize drawing space) ──
           if (mode != WorkspaceViewMode.canvasOnly)
-            Container(
-              height: 54,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: BoxDecoration(
-              color: surfaceColor,
-              border: Border(bottom: BorderSide(color: borderColor)),
-            ),
-            child: Row(
-              children: [
-                // Back to NoteFlow Dashboard button
-                InkWell(
-                  onTap: () => widget.state.setNavIndex(0),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: borderColor),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.arrow_back_rounded,
-                          size: 14,
-                          color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'Dashboard',
-                          style: GoogleFonts.inter(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
+            LayoutBuilder(
+              builder: (context, headerConstraints) {
+                final isNarrow = headerConstraints.maxWidth < 640;
+                final isSuperNarrow = headerConstraints.maxWidth < 420;
 
-                // Toggle Sidebar button (quick access to sidebar if needed)
-                Tooltip(
-                  message: widget.state.isNotebookSidebarVisible ? 'Hide Sidebar' : 'Show Sidebar',
-                  child: InkWell(
-                    onTap: () => widget.state.toggleNotebookSidebar(),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      padding: const EdgeInsets.all(7),
-                      decoration: BoxDecoration(
-                        color: widget.state.isNotebookSidebarVisible
-                            ? AppColors.primary.withValues(alpha: isDark ? 0.2 : 0.1)
-                            : (isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: widget.state.isNotebookSidebarVisible ? AppColors.primary : borderColor,
-                        ),
-                      ),
-                      child: Icon(
-                        widget.state.isNotebookSidebarVisible
-                            ? Icons.view_sidebar_rounded
-                            : Icons.view_sidebar_outlined,
-                        size: 15,
-                        color: widget.state.isNotebookSidebarVisible
-                            ? AppColors.primary
-                            : (isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-
-                // Active Workspace badge
-                if (widget.state.currentWorkspace != null) ...[
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1E2638) : const Color(0xFFEFF6FF),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: isDark ? const Color(0xFF2E3D59) : const Color(0xFFBFDBFE),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.workspaces_filled, size: 13, color: Color(0xFF2563EB)),
-                        const SizedBox(width: 5),
-                        Text(
-                          widget.state.currentWorkspace!.name,
-                          style: GoogleFonts.inter(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: isDark ? const Color(0xFF93C5FD) : const Color(0xFF1D4ED8),
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Icon(Icons.chevron_right_rounded, size: 16, color: textMuted),
-                  const SizedBox(width: 6),
-                ],
-
-                // Active Notebook badge
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                return Container(
+                  height: 54,
+                  padding: EdgeInsets.symmetric(horizontal: isNarrow ? 8 : 16),
                   decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: isDark ? 0.12 : 0.08),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
+                    color: surfaceColor,
+                    border: Border(bottom: BorderSide(color: borderColor)),
                   ),
                   child: Row(
-                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.menu_book_rounded, size: 14, color: AppColors.primary),
-                      const SizedBox(width: 6),
-                      Text(
-                        widget.state.currentCanvasDoc?.name ?? 'Notebook',
-                        style: GoogleFonts.inter(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.primary,
+                      // Back to NoteFlow Dashboard button
+                      InkWell(
+                        onTap: () => widget.state.setNavIndex(0),
+                        borderRadius: BorderRadius.circular(8),
+                        child: Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: isNarrow ? 8 : 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: borderColor),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.arrow_back_rounded,
+                                size: 14,
+                                color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                              ),
+                              if (!isSuperNarrow) ...[
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Dashboard',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                       ),
+                      const SizedBox(width: 8),
+
+                      // Toggle Sidebar button (hide on mobile where bottom nav is used)
+                      if (!isNarrow) ...[
+                        Tooltip(
+                          message: widget.state.isNotebookSidebarVisible ? 'Hide Sidebar' : 'Show Sidebar',
+                          child: InkWell(
+                            onTap: () => widget.state.toggleNotebookSidebar(),
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.all(7),
+                              decoration: BoxDecoration(
+                                color: widget.state.isNotebookSidebarVisible
+                                    ? AppColors.primary.withValues(alpha: isDark ? 0.2 : 0.1)
+                                    : (isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: widget.state.isNotebookSidebarVisible ? AppColors.primary : borderColor,
+                                ),
+                              ),
+                              child: Icon(
+                                widget.state.isNotebookSidebarVisible
+                                    ? Icons.view_sidebar_rounded
+                                    : Icons.view_sidebar_outlined,
+                                size: 15,
+                                color: widget.state.isNotebookSidebarVisible
+                                    ? AppColors.primary
+                                    : (isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                      ],
+
+                      // Active Workspace badge (desktop/tablet only)
+                      if (!isNarrow && widget.state.currentWorkspace != null) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF1E2638) : const Color(0xFFEFF6FF),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: isDark ? const Color(0xFF2E3D59) : const Color(0xFFBFDBFE),
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.workspaces_filled, size: 13, color: Color(0xFF2563EB)),
+                              const SizedBox(width: 5),
+                              Text(
+                                widget.state.currentWorkspace!.name,
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark ? const Color(0xFF93C5FD) : const Color(0xFF1D4ED8),
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Icon(Icons.chevron_right_rounded, size: 16, color: textMuted),
+                        const SizedBox(width: 6),
+                      ],
+
+                      // Active Notebook badge
+                      Flexible(
+                        child: Container(
+                          padding: EdgeInsets.symmetric(horizontal: isNarrow ? 8 : 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: AppColors.primary.withValues(alpha: isDark ? 0.12 : 0.08),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.menu_book_rounded, size: 14, color: AppColors.primary),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  widget.state.currentCanvasDoc?.name ?? 'Notebook',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.primary,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+
+                      const Spacer(),
+
+                      // ── Right Actions ─────────────────────────────────────────
+                      // AI Chat toggle button
+                      Tooltip(
+                        message: widget.state.viewMode == WorkspaceViewMode.canvasOnly
+                            ? 'Open AI Chat'
+                            : 'Close AI Chat',
+                        child: InkWell(
+                          onTap: () {
+                            if (widget.state.viewMode == WorkspaceViewMode.canvasOnly) {
+                              widget.state.setViewMode(WorkspaceViewMode.split);
+                            } else {
+                              widget.state.setViewMode(WorkspaceViewMode.canvasOnly);
+                            }
+                          },
+                          borderRadius: BorderRadius.circular(8),
+                          child: Container(
+                            padding: EdgeInsets.symmetric(horizontal: isNarrow ? 8 : 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
+                                  ? AppColors.primary.withValues(alpha: 0.12)
+                                  : (isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
+                                    ? AppColors.primary.withValues(alpha: 0.4)
+                                    : borderColor,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.auto_awesome,
+                                  size: 13,
+                                  color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
+                                      ? AppColors.primary
+                                      : textMuted,
+                                ),
+                                if (!isSuperNarrow) ...[
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    widget.state.viewMode != WorkspaceViewMode.canvasOnly
+                                        ? 'Close Chat'
+                                        : 'AI Chat',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
+                                          ? AppColors.primary
+                                          : textMuted,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      if (!isNarrow) ...[
+                        const SizedBox(width: 8),
+
+                        // Auto-canvas toggle indicator
+                        Tooltip(
+                          message: widget.state.autoWriteToCanvas
+                              ? 'AI chat answers are written directly onto the infinite canvas'
+                              : 'Auto-write to canvas is disabled',
+                          child: InkWell(
+                            onTap: widget.state.toggleAutoWriteToCanvas,
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: widget.state.autoWriteToCanvas
+                                    ? AppColors.accentGlow
+                                    : (isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: widget.state.autoWriteToCanvas
+                                      ? AppColors.accent.withValues(alpha: 0.35)
+                                      : borderColor,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.auto_awesome,
+                                    size: 12,
+                                    color: widget.state.autoWriteToCanvas ? AppColors.accent : textMuted,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Text(
+                                    widget.state.autoWriteToCanvas ? 'AI→Canvas: ON' : 'AI→Canvas: OFF',
+                                    style: GoogleFonts.inter(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: widget.state.autoWriteToCanvas ? AppColors.accent : textMuted,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
-                ),
-
-                const Spacer(),
-
-                // ── Right Actions ─────────────────────────────────────────
-                // AI Chat toggle button
-                Tooltip(
-                  message: widget.state.viewMode == WorkspaceViewMode.canvasOnly
-                      ? 'Open AI Chat'
-                      : 'Close AI Chat',
-                  child: InkWell(
-                    onTap: () {
-                      if (widget.state.viewMode == WorkspaceViewMode.canvasOnly) {
-                        widget.state.setViewMode(WorkspaceViewMode.split);
-                      } else {
-                        widget.state.setViewMode(WorkspaceViewMode.canvasOnly);
-                      }
-                    },
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
-                            ? AppColors.primary.withValues(alpha: 0.12)
-                            : (isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
-                              ? AppColors.primary.withValues(alpha: 0.4)
-                              : borderColor,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.auto_awesome,
-                            size: 13,
-                            color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
-                                ? AppColors.primary
-                                : textMuted,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            widget.state.viewMode != WorkspaceViewMode.canvasOnly
-                                ? 'Close Chat'
-                                : 'AI Assistant',
-                            style: GoogleFonts.inter(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: widget.state.viewMode != WorkspaceViewMode.canvasOnly
-                                  ? AppColors.primary
-                                  : textMuted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(width: 8),
-
-                // Auto-canvas toggle indicator
-                Tooltip(
-                  message: widget.state.autoWriteToCanvas
-                      ? 'AI chat answers are written directly onto the infinite canvas'
-                      : 'Auto-write to canvas is disabled',
-                  child: InkWell(
-                    onTap: widget.state.toggleAutoWriteToCanvas,
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: widget.state.autoWriteToCanvas
-                            ? AppColors.accentGlow
-                            : (isDark ? AppColors.darkSurfaceCard : AppColors.lightSurfaceCard),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: widget.state.autoWriteToCanvas
-                              ? AppColors.accent.withValues(alpha: 0.35)
-                              : borderColor,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.auto_awesome,
-                            size: 12,
-                            color: widget.state.autoWriteToCanvas ? AppColors.accent : textMuted,
-                          ),
-                          const SizedBox(width: 5),
-                          Text(
-                            widget.state.autoWriteToCanvas ? 'AI→Canvas: ON' : 'AI→Canvas: OFF',
-                            style: GoogleFonts.inter(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: widget.state.autoWriteToCanvas ? AppColors.accent : textMuted,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+                );
+              },
             ),
-          ),
 
           // ── Main Workspace Area ───────────────────────────────────────────
           Expanded(

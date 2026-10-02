@@ -59,6 +59,7 @@ class CanvasToolbar extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final isMobile = constraints.maxWidth < 680;
+        final isVeryNarrow = constraints.maxWidth < 390;
         final isCompact = constraints.maxWidth < 950;
         final toolIconSize = isCompact ? 22.0 : 25.0;
         final toolPadding = isCompact ? 5.0 : 7.0;
@@ -174,7 +175,7 @@ class CanvasToolbar extends StatelessWidget {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            if (totalPages > 1)
+                            if (totalPages > 1 && !isVeryNarrow)
                               InkWell(
                                 onTap: currentPageIndex > 0 ? () => onPageChanged(currentPageIndex - 1) : null,
                                 borderRadius: const BorderRadius.horizontal(left: Radius.circular(6)),
@@ -198,7 +199,7 @@ class CanvasToolbar extends StatelessWidget {
                                 ),
                               ),
                             ),
-                            if (totalPages > 1)
+                            if (totalPages > 1 && !isVeryNarrow)
                               InkWell(
                                 onTap: currentPageIndex < totalPages - 1 ? () => onPageChanged(currentPageIndex + 1) : null,
                                 borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
@@ -217,13 +218,14 @@ class CanvasToolbar extends StatelessWidget {
 
                       const SizedBox(width: 2),
 
-                      _iconBtn(
-                        icon: Icons.add_rounded,
-                        tip: 'Add Page',
-                        onTap: onAddPage,
-                        color: iconColor,
-                        padding: const EdgeInsets.all(5),
-                      ),
+                      if (!isVeryNarrow)
+                        _iconBtn(
+                          icon: Icons.add_rounded,
+                          tip: 'Add Page',
+                          onTap: onAddPage,
+                          color: iconColor,
+                          padding: const EdgeInsets.all(5),
+                        ),
                       _iconBtn(
                         icon: Icons.more_horiz_rounded,
                         tip: 'Options',
