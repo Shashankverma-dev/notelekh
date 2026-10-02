@@ -1,0 +1,110 @@
+# ==========================================
+# Root .gitignore for Notelekh (Monorepo)
+# ==========================================
+
+# --- Operating System & Editor Files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.history/
+**/.history/
+
+# --- IDEs ---
+.idea/
+**/.idea/
+*.iml
+*.ipr
+*.iws
+.atom/
+.build/
+.buildlog/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# --- Firebase Hosting & CLI ---
+.firebase/
+**/.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+*.local.json
+
+# --- Flutter / Dart ---
+.dart_tool/
+**/.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+**/.pub-cache/
+.pub/
+**/.pub/
+build/
+**/build/
+coverage/
+**/coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+**/ios/Flutter/ephemeral/
+**/macos/Flutter/ephemeral/
+migrate_working_dir/
+
+# Flutter Symbolication & Obfuscation
+app.*.symbols
+app.*.map.json
+
+# Android Studio / Gradle outputs
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+**/android/.gradle/
+**/android/captures/
+
+# --- Python & Backend ---
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+**/.pytest_cache/
+.ruff_cache/
+**/.ruff_cache/
+*.egg-info/
+**/*.egg-info/
+dist/
+**/dist/
+eggs/
+.eggs/
+*.egg
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+
+# Environment Variables & Secrets
+.env
+*.env
+!.env.example
+
+# Local SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads directory (retain structure, ignore files)
+apps/backend/uploads/*
+!apps/backend/uploads/.gitkeep

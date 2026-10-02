@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Notelekh is a modern digital workspace for writing, sketching, studying, annotating and organizing your ideas.">
+
+  <!-- iPad / iOS touch & gesture optimizations -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Notelekh">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Notelekh — Think. Write. Grow.</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Preload & Preconnect to critical resources for Lighthouse LCP -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+  <link rel="preload" href="https://www.gstatic.com/flutter-canvaskit/06a2e2a110089dff50fe635cffd2a61e1b24fbcd/chromium/canvaskit.wasm" as="fetch" type="application/wasm" crossorigin>
+
+
+  <style>
+    /* Prevent tap highlight and callout, while allowing text inputs to be selectable */
+    *, *::before, *::after {
+      -webkit-tap-highlight-color: transparent;
+    }
+    input, textarea, [contenteditable="true"] {
+      -webkit-user-select: text !important;
+      user-select: text !important;
+      -webkit-touch-callout: default !important;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none !important;
+      -webkit-overflow-scrolling: auto;
+      background-color: #FFFFFF;
+    }
+    /* Drawing surface: strict touch-action and selection suppression for drawing */
+    flt-glass-pane, flt-scene-host, canvas, flutter-view, .drawing-surface {
+      touch-action: none !important;
+      -webkit-touch-callout: none !important;
+      -webkit-user-select: none !important;
+      user-select: none !important;
+      cursor: auto;
+    }
+  </style>
+
+  <script>
+    // =========================================================================
+    // iPadOS Safari Apple Pencil Pro WebKit Stabilizer
+    // =========================================================================
+    // Eliminates Safari page gesture zoom and long-press callouts while allowing
+    // Apple Pencil Pro pointerdown, pointermove, and pointerup events to stream
+    // cleanly directly to Flutter Web's canvas without interference or cancellation.
+    (function() {
+      var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (!isIOS) return;
+
+      // 1. Prevent Safari browser gesture zoom (pinch/rotate at the window level)
+      document.addEventListener('gesturestart', function(e) { e.preventDefault(); }, { passive: false });
+      document.addEventListener('gesturechange', function(e) { e.preventDefault(); }, { passive: false });
+      document.addEventListener('gestureend', function(e) { e.preventDefault(); }, { passive: false });
+
+      // 2. Prevent iOS context menu on long press (unless inside text input)
+      window.addEventListener('contextmenu', function(e) {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
+        e.preventDefault();
+      }, { capture: true });
+
+      // 3. Enforce touch-action:none on Flutter's shadow DOM for Apple Pencil
+      function secureRoot(root) {
+        if (!root) return;
+        try {
+          if (!root.getElementById('pencil-shadow-fix')) {
+            var style = document.createElement('style');
+            style.id = 'pencil-shadow-fix';
+            style.textContent = '*, *::before, *::after, canvas, flt-scene-host, flt-glass-pane { touch-action: none !important; -webkit-user-select: none !important; cursor: auto; }';
+            root.appendChild(style);
+          }
+        } catch(err) {}
+      }
+
+      function applyTouchAction() {
+        var view = document.querySelector('flutter-view, flt-glass-pane');
+        if (view) {
+          if (view.shadowRoot) secureRoot(view.shadowRoot);
+          if (observer) {
+            observer.disconnect();
+            observer = null;
+          }
+        }
+      }
+
+      var observer = new MutationObserver(applyTouchAction);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      applyTouchAction();
+
+      // 4. Prevent Safari 3D Touch / touchforcechange on Apple Pencil canvas
+      document.addEventListener('touchforcechange', function(e) {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+        e.preventDefault();
+      }, { passive: false });
+
+      // 5. Prevent double-tap zoom on Safari
+      document.addEventListener('dblclick', function(e) {
+        if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+        e.preventDefault();
+      }, { passive: false });
+    })();
+  </script>
+</head>
+<body>  <!-- Modern Responsive Landing Skeleton Preloader Shell -->
+  <div id="flutter-preloader" style="position:fixed;inset:0;background:#FAFBFC;z-index:9999;overflow-y:auto;overflow-x:hidden;font-family:'Plus Jakarta Sans','Inter',-apple-system,BlinkMacSystemFont,sans-serif;color:#0F172A;transition:opacity 0.4s cubic-bezier(0.16,1,0.3,1);pointer-events:none;-webkit-font-smoothing:antialiased;">
+    <style>
+      .sk-glow {
+        background: radial-gradient(circle 600px at 50% 10%, rgba(99, 102, 241, 0.08), transparent 70%);
+      }
+      .sk-nav-link {
+        font-size: 14px;
+        font-weight: 600;
+        color: #475569;
+        text-decoration: none;
+        padding: 6px 12px;
+        border-radius: 8px;
+        transition: color 0.15s ease, background 0.15s ease;
+      }
+      .sk-nav-link:hover {
+        color: #0F172A;
+        background: #F1F5F9;
+      }
+      @media (max-width: 768px) {
+        .sk-desktop-nav { display: none !important; }
+        .sk-hero-title { font-size: 32px !important; letter-spacing: -0.8px !important; }
+        .sk-hero-sub { font-size: 15px !important; }
+        .sk-canvas-preview { height: 230px !important; margin-top: 20px !important; }
+        .sk-sticky-note { display: none !important; }
+      }
+    </style>
+
+    <div class="sk-glow" style="min-height:100vh; padding-bottom:60px;">
+      <!-- Top Navbar -->
+      <header style="max-width: 1200px; margin: 0 auto; padding: 20px 28px; display: flex; align-items: center; justify-content: space-between;">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <img src="icons/Icon-192.png" width="36" height="36" alt="Notelekh" style="border-radius:10px; box-shadow:0 6px 16px rgba(92,89,242,0.24);">
+          <div>
+            <div style="font-size:20px; font-weight:800; letter-spacing:-0.6px; color:#0F172A; line-height:1.1;">Notelekh</div>
+            <div style="font-size:11px; font-weight:600; color:#64748B; letter-spacing:0.2px;">Think. Write. Grow.</div>
+          </div>
+        </div>
+
+        <nav class="sk-desktop-nav" style="display:flex; align-items:center; gap:8px;">
+          <span class="sk-nav-link">Features</span>
+          <span class="sk-nav-link">Canvas Studio</span>
+          <span class="sk-nav-link">Handwriting</span>
+          <span class="sk-nav-link">AI Copilot</span>
+        </nav>
+
+        <div style="display:flex; align-items:center; gap:12px;">
+          <div style="background:linear-gradient(135deg, #0F172A 0%, #1E293B 100%); color:#FFFFFF; border-radius:999px; padding:11px 22px; font-size:14px; font-weight:600; display:inline-flex; align-items:center; gap:8px; box-shadow:0 4px 14px rgba(15,23,42,0.18);">
+            <span>Get started free</span>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </div>
+        </div>
+      </header>
+
+      <!-- Hero Section: Human, Inspiring & Creative -->
+      <main style="max-width: 980px; margin: 40px auto 0; text-align: center; padding: 0 24px; position: relative;">
+
+
+        <!-- Headline -->
+        <h1 class="sk-hero-title" style="font-size:48px; font-weight:800; color:#0F172A; line-height:1.16; letter-spacing:-1.2px; margin:0 0 18px; padding:0;">
+          Where thoughts take shape.<br>
+          <span style="position:relative; display:inline-block; background:linear-gradient(135deg, #4F46E5 0%, #7C3AED 50%, #EC4899 100%); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent;">
+            Write freely. Think deeply.
+            <!-- Hand-drawn SVG doodle underline -->
+            <svg style="position:absolute; bottom:-10px; left:0; width:100%; height:14px; overflow:visible;" viewBox="0 0 320 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M3 8C60 3 140 11 210 6C260 2 295 9 317 7" stroke="#6366F1" stroke-width="3.2" stroke-linecap="round" opacity="0.75"/>
+            </svg>
+          </span>
+        </h1>
+
+        <!-- Subtitle -->
+        <p class="sk-hero-sub" style="font-size:17.5px; color:#475569; max-width:640px; margin:0 auto 28px; line-height:1.6; font-weight:450;">
+          Experience the tactile freedom of pen on paper, amplified by infinite spatial canvases, deep PDF annotation, and ambient AI study copilots.
+        </p>
+
+        <!-- Primary Action Button -->
+        <div style="display:flex; flex-direction:column; align-items:center; gap:8px; margin-bottom:38px;">
+          <div style="background:linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); color:#FFFFFF; padding:14px 34px; border-radius:14px; font-size:15.5px; font-weight:700; box-shadow:0 12px 32px rgba(79,70,229,0.34); display:inline-flex; align-items:center; gap:10px; cursor:pointer;">
+            <span>Get started free</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+          </div>
+          <div style="font-size:12px; font-weight:500; color:#64748B;">No credit card required &bull; Works seamlessly in browser, tablet &amp; desktop</div>
+        </div>
+
+        <!-- Studio Canvas Mockup with Creative Artifacts -->
+        <div class="sk-canvas-preview" style="max-width:900px; height:290px; background:#FFFFFF; border:1px solid #E2E8F0; border-radius:24px; box-shadow:0 30px 70px -15px rgba(79,70,229,0.13), 0 10px 24px -5px rgba(0,0,0,0.04); margin:0 auto; overflow:hidden; position:relative; display:flex; flex-direction:column;">
+          <!-- Studio Header Toolbar -->
+          <div style="height:46px; background:#F8FAFC; border-bottom:1px solid #E2E8F0; display:flex; align-items:center; justify-content:space-between; padding:0 20px;">
+            <!-- Traffic Lights -->
+            <div style="display:flex; align-items:center; gap:7px;">
+              <div style="width:11px; height:11px; border-radius:50%; background:#EF4444; box-shadow:inset 0 1px 2px rgba(0,0,0,0.2);"></div>
+              <div style="width:11px; height:11px; border-radius:50%; background:#F59E0B; box-shadow:inset 0 1px 2px rgba(0,0,0,0.2);"></div>
+              <div style="width:11px; height:11px; border-radius:50%; background:#10B981; box-shadow:inset 0 1px 2px rgba(0,0,0,0.2);"></div>
+            </div>
+
+            <!-- Toolbelt & Ink Palette -->
+            <div style="display:flex; align-items:center; gap:14px;">
+              <!-- Tools with Active Highlight -->
+              <div style="display:flex; align-items:center; gap:4px; background:#FFFFFF; padding:4px 6px; border-radius:10px; border:1px solid #E2E8F0;">
+                <!-- Pen (Active) -->
+                <div style="padding:4px 7px; background:#EEF2FF; border-radius:6px; display:flex; align-items:center;">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#4F46E5" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/></svg>
+                </div>
+                <!-- Highlighter -->
+                <div style="padding:4px 7px; display:flex; align-items:center;">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11-6 6v3h3l6-6"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>
+                </div>
+                <!-- Lasso / Shape -->
+                <div style="padding:4px 7px; display:flex; align-items:center;">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 3"/></svg>
+                </div>
+                <!-- AI Wand -->
+                <div style="padding:4px 7px; display:flex; align-items:center;">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7C3AED" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 4-2 4 4-2zm-5 8-2 4 4-2zm11-9-9 9m-2 2-9 9"/></svg>
+                </div>
+              </div>
+
+              <!-- Curated Ink Palette -->
+              <div style="display:flex; align-items:center; gap:6px;">
+                <div style="width:13px; height:13px; border-radius:50%; background:#4F46E5; box-shadow:0 0 0 2px #FFFFFF, 0 0 0 3px #4F46E5;"></div>
+                <div style="width:13px; height:13px; border-radius:50%; background:#0284C7;"></div>
+                <div style="width:13px; height:13px; border-radius:50%; background:#059669;"></div>
+                <div style="width:13px; height:13px; border-radius:50%; background:#D97706;"></div>
+                <div style="width:13px; height:13px; border-radius:50%; background:#1E293B;"></div>
+              </div>
+            </div>
+
+            <!-- Studio Badge -->
+            <div style="background:#EEF2FF; color:#4F46E5; font-size:11.5px; font-weight:700; padding:4px 10px; border-radius:8px; display:flex; align-items:center; gap:5px;">
+              <span style="width:6px; height:6px; border-radius:50%; background:#10B981;"></span>
+              <span>Studio v2.0 &bull; 120 FPS</span>
+            </div>
+          </div>
+
+          <!-- Dot-Grid Canvas with Authentic Sketches & Sticky Note -->
+          <div style="flex:1; background-color:#FFFFFF; background-image:radial-gradient(#CBD5E1 1.2px, transparent 1.2px); background-size:22px 22px; padding:24px 32px; position:relative; overflow:hidden; text-align:left;">
+            <!-- Mathematical Concept & OCR Tag -->
+            <div style="font-family:'Caveat',cursive; font-size:23px; font-weight:700; color:#1E293B; line-height:1.4;">
+              <div style="display:flex; align-items:center; gap:12px;">
+                <span style="color:#4F46E5; font-size:25px;">f(x) = &int; e<sup>-t&sup2;</sup> dt</span>
+                <span style="font-size:13px; font-family:'Plus Jakarta Sans',sans-serif; background:#ECFDF5; border:1px solid #A7F3D0; color:#059669; font-weight:600; padding:3px 10px; border-radius:8px; display:inline-flex; align-items:center; gap:5px;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  Verified by AI Engine
+                </span>
+              </div>
+              <div style="color:#64748B; font-size:18px; margin-top:4px;">
+                Graph inflection reaches maximum at x = 0 &bull; Critical Gaussian convergence verified
+              </div>
+            </div>
+
+            <!-- Stylus Smooth Wave Doodle -->
+            <svg style="width:310px; height:34px; margin-top:6px;" viewBox="0 0 310 34" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 22C42 6 72 30 114 14C154 0 196 26 238 10C260 2 284 18 306 8" stroke="#4F46E5" stroke-width="2.8" stroke-linecap="round"/>
+            </svg>
+
+            <!-- Handwritten Annotation -->
+            <div style="font-family:'Caveat',cursive; font-size:17px; font-weight:700; color:#7C3AED; margin-top:4px;">
+              &ldquo;Notice: multi-head projections preserve spatial reasoning across layers!&rdquo;
+            </div>
+
+            <!-- Realistic Tilted Pastel Sticky Note -->
+            <div class="sk-sticky-note" style="position:absolute; right:32px; top:16px; width:184px; background:#FEF9C3; border:1px solid #FEF08A; border-radius:12px; padding:12px 16px; transform:rotate(-3deg); box-shadow:0 10px 24px rgba(0,0,0,0.07);">
+              <!-- Frosted Tape on Top -->
+              <div style="width:48px; height:12px; background:rgba(255,255,255,0.75); backdrop-filter:blur(2px); border-radius:3px; margin:-18px auto 8px; box-shadow:0 1px 3px rgba(0,0,0,0.06);"></div>
+              <div style="display:flex; align-items:center; gap:6px; font-family:'Caveat',cursive; font-size:18px; font-weight:700; color:#854D0E; margin-bottom:6px;">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#854D0E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5M5 17h14l-2-7V4h1V2H6v2h1v6l-2 7z"/></svg>
+                Study Sprint Goals:
+              </div>
+              <div style="font-size:11.5px; font-weight:600; color:#713F12; line-height:1.7;">
+                <span style="color:#059669;">&#10003;</span> Neural Attention Week 4<br>
+                <span style="color:#059669;">&#10003;</span> Vector Calculus &amp; Proofs<br>
+                <span style="color:#94A3B8;">&#9633;</span> Review Flashcards (Friday)
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+
+  <script>
+    (function() {
+      // If user is returning from auth redirect or has pending auth, hide the landing preloader immediately
+      try {
+        var isRedirect = localStorage.getItem('flutter.notelekh_pending_auth_redirect') === 'true' ||
+                         sessionStorage.getItem('notelekh_pending_auth_redirect') === 'true';
+        if (isRedirect) {
+          var pre = document.getElementById('flutter-preloader');
+          if (pre) {
+            pre.style.display = 'none';
+          }
+        }
+      } catch (e) {}
+
+      function removePreloader() {
+        var el = document.getElementById('flutter-preloader');
+        if (el) {
+          el.style.opacity = '0';
+          setTimeout(function() { if (el && el.parentNode) el.parentNode.removeChild(el); }, 380);
+        }
+      }
+      window.addEventListener('flutter-first-frame', removePreloader);
+      var interval = setInterval(function() {
+        if (document.querySelector('flutter-view, flt-glass-pane, canvas')) {
+          removePreloader();
+          clearInterval(interval);
+        }
+      }, 50);
+      // Failsafe timeout so preloader is never stuck if an event is delayed
+      setTimeout(removePreloader, 2500);
+    })();
+  </script>
+
+  <script src="flutter_bootstrap.js?v=20261002_v7" async></script>
+</body>
+</html>
