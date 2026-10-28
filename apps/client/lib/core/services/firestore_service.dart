@@ -31,16 +31,21 @@ class FirestoreService {
           .collection('workspaces')
           .get();
           
-      final list = snapshot.docs.map((doc) {
-        final data = _normalizeTimestamps(doc.data());
-        data['id'] = doc.id;
-        return WorkspaceModel.fromJson(data);
-      }).toList();
+      final List<WorkspaceModel> list = [];
+      for (final doc in snapshot.docs) {
+        try {
+          final data = _normalizeTimestamps(doc.data());
+          data['id'] = doc.id;
+          list.add(WorkspaceModel.fromJson(data));
+        } catch (itemE) {
+          debugPrint('Error parsing workspace doc ${doc.id}: $itemE');
+        }
+      }
       list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       return list;
     } catch (e) {
       debugPrint('Firestore Error getting workspaces: $e');
-      rethrow;
+      return [];
     }
   }
 
@@ -132,14 +137,47 @@ class FirestoreService {
             .get();
       }
           
-      final list = snapshot.docs.map((doc) {
-        final data = _normalizeTimestamps(doc.data());
-        data['id'] = doc.id;
-        return CanvasDocModel.fromJson(data);
-      }).toList();
+      final List<CanvasDocModel> list = [];
+      for (final doc in snapshot.docs) {
+        try {
+          final data = _normalizeTimestamps(doc.data());
+          data['id'] = doc.id;
+          list.add(CanvasDocModel.fromJson(data));
+        } catch (docE) {
+          debugPrint('Error parsing canvas doc ${doc.id}: $docE');
+        }
+      }
       return list;
     } catch (e) {
       debugPrint('Firestore Error getting canvas docs: $e');
+      return [];
+    }
+  }
+
+  /// Search across all workspaces of a user to retrieve any canvas documents (prevents stranded notes)
+  Future<List<CanvasDocModel>> getAllUserCanvasDocs(String userId) async {
+    try {
+      final workspacesSnap = await _db
+          .collection('users')
+          .doc(userId)
+          .collection('workspaces')
+          .get();
+      final List<CanvasDocModel> allDocs = [];
+      for (final ws in workspacesSnap.docs) {
+        try {
+          final docsSnap = await ws.reference.collection('canvas_docs').get();
+          for (final doc in docsSnap.docs) {
+            try {
+              final data = _normalizeTimestamps(doc.data());
+              data['id'] = doc.id;
+              allDocs.add(CanvasDocModel.fromJson(data));
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+      return allDocs;
+    } catch (e) {
+      debugPrint('Firestore Error getting all user canvas docs: $e');
       return [];
     }
   }

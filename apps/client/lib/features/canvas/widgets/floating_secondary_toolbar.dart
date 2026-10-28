@@ -190,11 +190,11 @@ class FloatingSecondaryToolbar extends StatelessWidget {
         _divider(isDark),
 
         // Straight line assist toggle
-        Tooltip(
-          message: 'Draw in Straight Line',
-          child: InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () => state.setHighlighterStraightLine(!state.highlighterStraightLine),
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => state.setHighlighterStraightLine(!state.highlighterStraightLine),
+          child: Tooltip(
+            message: 'Draw in Straight Line',
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
@@ -275,8 +275,8 @@ class FloatingSecondaryToolbar extends StatelessWidget {
         // Erase Highlighter Only Toggle
         Tooltip(
           message: 'Erase Highlighter Only',
-          child: InkWell(
-            borderRadius: BorderRadius.circular(12),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
             onTap: () => state.setEraseHighlighterOnly(!state.eraseHighlighterOnly),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -455,6 +455,7 @@ class FloatingSecondaryToolbar extends StatelessWidget {
   }) {
     final isSelected = state.lassoMode == mode;
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: () => state.setLassoMode(mode),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
@@ -949,6 +950,7 @@ class FloatingSecondaryToolbar extends StatelessWidget {
   }) {
     final isSelected = state.eraserMode == mode;
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: () => state.setEraserMode(mode),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
@@ -1002,21 +1004,35 @@ class FloatingSecondaryToolbar extends StatelessWidget {
       CanvasTool.arrow: Icons.arrow_right_alt_rounded,
     };
 
-    return GestureDetector(
-      onTap: () => state.setTool(tool),
-      child: Container(
-        width: 32,
-        height: 32,
-        margin: const EdgeInsets.symmetric(horizontal: 1.5),
-        decoration: BoxDecoration(
-          color: isSelected ? AppColors.primary.withValues(alpha: 0.15) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Center(
-          child: Icon(
-            shapeIconMap[tool] ?? Icons.crop_square_rounded,
-            size: 18,
-            color: iconColor,
+    const shapeTooltips = <CanvasTool, String>{
+      CanvasTool.rectangle: 'Rectangle',
+      CanvasTool.circle: 'Circle',
+      CanvasTool.triangle: 'Triangle',
+      CanvasTool.line: 'Line',
+      CanvasTool.arrow: 'Arrow',
+    };
+
+    final tip = shapeTooltips[tool] ?? 'Shape';
+
+    return Tooltip(
+      message: tip,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => state.setTool(tool),
+        child: Container(
+          width: 32,
+          height: 32,
+          margin: const EdgeInsets.symmetric(horizontal: 1.5),
+          decoration: BoxDecoration(
+            color: isSelected ? AppColors.primary.withValues(alpha: 0.15) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Center(
+            child: Icon(
+              shapeIconMap[tool] ?? Icons.crop_square_rounded,
+              size: 18,
+              color: iconColor,
+            ),
           ),
         ),
       ),

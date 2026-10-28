@@ -17,12 +17,17 @@ class ResponsiveShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final w = constraints.maxWidth;
-        if (w >= 1024) return _DesktopShell(state: state);
-        if (w >= 640)  return _TabletShell(state: state);
-        return _MobileShell(state: state);
+    return ListenableBuilder(
+      listenable: state,
+      builder: (context, _) {
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final w = constraints.maxWidth;
+            if (w >= 1024) return _DesktopShell(state: state);
+            if (w >= 640)  return _TabletShell(state: state);
+            return _MobileShell(state: state);
+          },
+        );
       },
     );
   }

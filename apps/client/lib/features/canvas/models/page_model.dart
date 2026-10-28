@@ -22,9 +22,18 @@ class CanvasPage {
     DateTime? createdAt,
     this.panOffset = Offset.zero,
     this.zoomScale = 1.0,
+    this.isDirty = true,
   })  : title = title ?? 'Page $pageNumber',
         objects = objects ?? [],
         createdAt = createdAt ?? DateTime.now();
+
+  bool isDirty;
+  Map<String, dynamic>? _cachedJson;
+
+  void markDirty() {
+    isDirty = true;
+    _cachedJson = null;
+  }
 
   CanvasPage copyWith({
     String? id,
@@ -45,11 +54,15 @@ class CanvasPage {
       createdAt: createdAt ?? this.createdAt,
       panOffset: panOffset ?? this.panOffset,
       zoomScale: zoomScale ?? this.zoomScale,
+      isDirty: true,
     );
   }
 
   Map<String, dynamic> toJson() {
-    return {
+    if (!isDirty && _cachedJson != null) {
+      return _cachedJson!;
+    }
+    final json = {
       'id': id,
       'page_number': pageNumber,
       'title': title,
@@ -59,6 +72,9 @@ class CanvasPage {
       'zoom_scale': zoomScale,
       'objects': objects.map((o) => o.toJson()).toList(),
     };
+    _cachedJson = json;
+    isDirty = false;
+    return json;
   }
 
   factory CanvasPage.fromJson(Map<String, dynamic> json) {
@@ -118,7 +134,7 @@ class CanvasPage {
 
 class CanvasDocModel {
   final String id;
-  final String workspaceId;
+  String workspaceId;
   String name;
   final int documentVersion;
   List<CanvasPage> pages;
@@ -277,7 +293,7 @@ class CanvasDocModel {
       'cover_style_data': coverStyleData,
       'updated_at': (updatedAt ?? DateTime.now()).toIso8601String(),
       'pages': pages.map((p) => p.toJson()).toList(),
-      'objects': objects.map((o) => o.toJson()).toList(),
+      if (pages.isEmpty) 'objects': objects.map((o) => o.toJson()).toList(),
     };
   }
 }

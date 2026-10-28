@@ -4,6 +4,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/services.dart';
 import 'package:ai_workspace_client/state/app_state.dart';
 import 'package:ai_workspace_client/core/models/canvas_models.dart';
+import 'package:ai_workspace_client/core/services/pdf_extractor_service.dart';
+import 'package:ai_workspace_client/core/services/pdf_viewer_helper.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PDF Document Model & Study Pages
@@ -40,150 +42,99 @@ class PdfDocumentData {
         .replaceAll('_', ' ')
         .trim();
 
-    final isWeekDoc = baseTitle.toLowerCase().contains('week');
-    final isBiology = baseTitle.toLowerCase().contains('bio');
+    List<PdfPageData> pages = [];
 
-    List<PdfPageData> pages;
+    // 1. If actual PDF bytes are present, parse the real text from the user's PDF!
+    if (bytes != null && bytes.isNotEmpty) {
+      final extracted = PdfExtractorService.extractPages(bytes, docTitle: baseTitle);
+      if (extracted.isNotEmpty) {
+        pages = extracted.map((ep) {
+          final text = ep.text;
+          final lines = text
+              .split(RegExp(r'\r?\n|\. '))
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .toList();
+          final summaryText = lines.take(2).join('. ');
+          final bullets = lines.skip(2).take(4).toList();
+          return PdfPageData(
+            pageNumber: ep.pageNumber,
+            sectionTitle: ep.title,
+            summary: summaryText.isNotEmpty
+                ? summaryText
+                : (text.length > 200 ? '${text.substring(0, 200)}...' : text),
+            bulletPoints: bullets.isNotEmpty
+                ? bullets
+                : [text.length > 100 ? '${text.substring(0, 100)}...' : text],
+            keyTakeaway: lines.isNotEmpty ? lines.first : 'Notes from ${ep.title}',
+            rawContent: text,
+          );
+        }).toList();
+      }
+    }
 
-    if (isWeekDoc) {
+    // 2. Fallback if PDF has no text streams or when no bytes passed (e.g. preview / demo)
+    if (pages.isEmpty) {
       pages = [
         PdfPageData(
           pageNumber: 1,
-          sectionTitle: 'Chapter 1: $baseTitle - Core Syllabus & Concept Overview',
-          summary: 'Foundational framework and principal curriculum points covered throughout $baseTitle. Key concepts establish theoretical bases for subsequent practical problem sessions.',
+          sectionTitle: 'Chapter 1: $baseTitle - Overview',
+          summary:
+              'Core introduction and principles for $cleanName. Ready for direct handwriting, highlighting, and study notes.',
           bulletPoints: [
-            'Core Definitions: Essential variables, system boundary constraints, and preliminary assumptions.',
-            'Theoretical Framework: Underlying mathematical relations and domain models.',
-            'Preparatory Reading: Essential citations, lecture chapters, and reference materials.',
+            'Fundamental definitions, axioms, and structural framework.',
+            'Key architectural paradigms and standard methodology.',
+            'Initial baseline equations and domain principles.',
           ],
-          keyTakeaway: 'Mastering preliminary nomenclature ensures smooth progression through complex derivations.',
+          keyTakeaway:
+              'Foundational concepts and principles required for master synthesis.',
+          rawContent:
+              'Chapter 1: $baseTitle Overview\n\nFoundational principles and formulas for active study and note-taking.',
         ),
         PdfPageData(
           pageNumber: 2,
-          sectionTitle: 'Chapter 2: $baseTitle - Detailed Methodologies & Derivations',
-          summary: 'In-depth derivation and analysis of primary formulas, operational equations, and algorithmic steps introduced during the middle study units.',
+          sectionTitle: 'Chapter 2: Analytical Methods & Theorems',
+          summary:
+              'In-depth exploration of core theorems, mathematical formulations, and proof strategies.',
           bulletPoints: [
-            r'Governing Equations: Detailed multi-step transformation f(x, t) = ∑ c_n · e^(i ω_n t).',
-            'Boundary Conditions: Real-world operational constraints and validation parameters.',
-            'Algorithmic Complexity & Error Bounds: Asymptotic limits and convergence verification.',
+            'Rigorous derivation of key properties and operating limits.',
+            'Comparative analysis of classical vs modern frameworks.',
+            'Parametric optimization and boundary constraints.',
           ],
-          keyTakeaway: 'Stepwise justification of each equation eliminates common calculation pitfalls.',
+          keyTakeaway:
+              'Theoretical mechanics and rigorous validation techniques.',
+          rawContent:
+              'Chapter 2: Analytical Methods & Theorems\n\nIn-depth mathematical formulations and boundary limits.',
         ),
         PdfPageData(
           pageNumber: 3,
-          sectionTitle: 'Chapter 3: $baseTitle - Worked Examples & Problem Sets',
-          summary: 'Step-by-step problem sets illustrating direct application of the theoretical material to test scenarios and examination-style questions.',
+          sectionTitle: 'Chapter 3: Experimental Results & Applications',
+          summary:
+              'Empirical validation, benchmark evaluations, and practical implementation patterns.',
           bulletPoints: [
-            'Standard Exercise: Direct application of the primary formulation under standard equilibrium.',
-            'Corner Case Analysis: Edge-behavior testing when parameters approach extreme limits.',
-            'Recommended Verification: Sanity-checking units, sign conventions, and dimensional symmetry.',
+            'Empirical testing methodology and observational data.',
+            'Performance metrics, error bounds, and scaling curves.',
+            'Real-world case studies and industry best practices.',
           ],
-          keyTakeaway: 'Always cross-verify dimensional analysis prior to numerical evaluation.',
+          keyTakeaway:
+              'Empirical outcomes establish high precision across standard benchmarks.',
+          rawContent:
+              'Chapter 3: Experimental Results & Applications\n\nEmpirical validation, benchmark metrics, and practical implementations.',
         ),
         PdfPageData(
           pageNumber: 4,
-          sectionTitle: 'Chapter 4: $baseTitle - Review Checkpoints & High-Yield Summary',
-          summary: 'Consolidated review sheet featuring essential takeaways, mnemonic anchors, and exam preparation highlights designed for quick reference while taking notes.',
+          sectionTitle: 'Chapter 4: Synthesis, Future Work & Review Questions',
+          summary:
+              'Comprehensive synthesis, summary review checklists, and practice study questions.',
           bulletPoints: [
-            'Formula Memory Sheet: Core governing equations organized for rapid recall.',
-            'Common Exam Traps: Subtleties in sign conventions and parameter bounds to watch out for.',
-            'Next Steps: Bridging concepts that connect $baseTitle with upcoming coursework modules.',
+            'Synthesis checklist covering all foundational takeaways.',
+            'Open problems, research extensions, and next steps.',
+            'Self-test review prompts for spaced repetition recall.',
           ],
-          keyTakeaway: 'Focus on interconnected concept structures rather than isolated memorization.',
-        ),
-      ];
-    } else if (isBiology) {
-      pages = [
-        PdfPageData(
-          pageNumber: 1,
-          sectionTitle: 'Chapter 1: $baseTitle - Cell Morphology & Organelle Functions',
-          summary: 'Eukaryotic and prokaryotic cell architectures, compartmentalization, phospholipid bilayer membrane dynamics, and selective transport mechanisms.',
-          bulletPoints: [
-            'Fluid Mosaic Model: Phospholipids, cholesterol fluidity buffers, and integral transport proteins.',
-            'Organelle Coordination: Endoplasmic reticulum to Golgi apparatus vesicle trafficking.',
-            'Cellular Energy: Mitochondrial chemiosmosis and proton electrochemical gradients.',
-          ],
-          keyTakeaway: 'Membrane compartmentalization enables simultaneous incompatible biochemical reactions.',
-        ),
-        PdfPageData(
-          pageNumber: 2,
-          sectionTitle: 'Chapter 2: $baseTitle - Cellular Respiration & ATP Synthesis',
-          summary: 'Complete biochemical pathway analysis encompassing glycolysis, the Krebs citric acid cycle, and oxidative phosphorylation yielding cellular energy.',
-          bulletPoints: [
-            'Glycolysis: Cytoplasmic breakdown of glucose yielding net 2 ATP and 2 NADH.',
-            'Citric Acid Cycle: Mitochondrial matrix oxidation producing FADH2 and high-energy electron carriers.',
-            'ATP Synthase: Rotary motor mechanism driven by proton-motive force across inner membrane.',
-          ],
-          keyTakeaway: 'Oxidative phosphorylation accounts for over 85% of total cellular ATP production.',
-        ),
-        PdfPageData(
-          pageNumber: 3,
-          sectionTitle: 'Chapter 3: $baseTitle - Molecular Genetics & Gene Expression',
-          summary: 'Central dogma of molecular biology: DNA replication, RNA transcription with post-transcriptional processing, and ribosomal translation.',
-          bulletPoints: [
-            'Transcription: RNA Polymerase II promoter binding and pre-mRNA 5\' capping and polyadenylation.',
-            'Alternative Splicing: Spliceosome exon selection generating proteomic diversity.',
-            'Translation: Ribosomal tRNA anticodon recognition and peptide bond elongation.',
-          ],
-          keyTakeaway: 'Epigenetic histone modifications dynamically regulate gene accessibility.',
-        ),
-        PdfPageData(
-          pageNumber: 4,
-          sectionTitle: 'Chapter 4: $baseTitle - Cell Signaling & Homeostatic Regulation',
-          summary: 'Signal transduction cascades: G-protein coupled receptors (GPCRs), receptor tyrosine kinases (RTKs), second messengers, and cellular feedback loops.',
-          bulletPoints: [
-            'Receptor Activation: Ligand binding inducing conformational shifts and phosphorylation.',
-            'Second Messengers: cAMP, IP3, DAG, and intracellular calcium signaling waves.',
-            'Cell Cycle Checkpoints: Cyclin-CDK complexes governing G1/S and G2/M mitotic transitions.',
-          ],
-          keyTakeaway: 'Kinase cascades exponentially amplify minute extracellular signals into broad cellular responses.',
-        ),
-      ];
-    } else {
-      pages = [
-        PdfPageData(
-          pageNumber: 1,
-          sectionTitle: 'Chapter 1: $baseTitle - Foundational Architecture & Principles',
-          summary: 'Fundamental architecture and mathematical formulations establishing core systems. Signals and inputs x_i are transformed via weights w_i and biases b through transfer functions f(z).',
-          bulletPoints: [
-            r'Governing Model: y = f(∑ w_i x_i + b)',
-            'Activation functions provide non-linear transformations: ReLU, Sigmoid, GeLU, and Leaky ReLU.',
-            'Universal Approximation: Multi-layer networks approximate continuous functions over compact sets.',
-          ],
-          keyTakeaway: 'Non-linear transformations allow representations to capture intricate hierarchical features.',
-        ),
-        PdfPageData(
-          pageNumber: 2,
-          sectionTitle: 'Chapter 2: $baseTitle - Forward Transformations & Objectives',
-          summary: 'Signals progress sequentially through multi-stage computational layers to generate targets y_hat, evaluated via specialized objective loss metrics L(θ).',
-          bulletPoints: [
-            r'Cross-Entropy Formulation: L = -∑ y_i log(y_hat_i)',
-            r'Mean Squared Error (MSE): L = (1 / 2N) ∑ (y_i - y_hat_i)²',
-            'Batch Normalization stabilizes internal covariate shifts for accelerated gradient descent.',
-          ],
-          keyTakeaway: 'Objective loss geometries determine convergence rates and optimizer stability.',
-        ),
-        PdfPageData(
-          pageNumber: 3,
-          sectionTitle: 'Chapter 3: $baseTitle - Backpropagation & Optimization Dynamics',
-          summary: 'Chain-rule reverse gradient propagation computing exact partial derivatives ∂L / ∂w_ij, accelerated with momentum and adaptive step sizes.',
-          bulletPoints: [
-            'Stochastic Gradient Descent (SGD) with Nesterov accelerated momentum.',
-            'Adam Optimization: First and second-moment exponential moving averages.',
-            'Gradient Regulation: Residual skip pathways prevent vanishing gradient degradation.',
-          ],
-          keyTakeaway: 'Residual highway connections maintain stable gradients across arbitrary model depths.',
-        ),
-        PdfPageData(
-          pageNumber: 4,
-          sectionTitle: 'Chapter 4: $baseTitle - Advanced Mechanisms & Summary',
-          summary: 'Modern architectural mechanisms including self-attention, scaled dot-product tensors, and positional embeddings enabling parallel sequence processing.',
-          bulletPoints: [
-            r'Attention Kernel: Attention(Q, K, V) = softmax(Q·K^T / √d_k) · V',
-            'Multi-Head Projection expands expressive representation into disparate orthogonal subspaces.',
-            'Rotary Positional Embeddings (RoPE) represent relative token positions continuously.',
-          ],
-          keyTakeaway: 'Self-attention scales linearly across distributed matrix computation units.',
+          keyTakeaway:
+              'Mastery of concepts through active recall and handwritten problem-solving.',
+          rawContent:
+              'Chapter 4: Synthesis & Review\n\nComprehensive review checklist and study synthesis.',
         ),
       ];
     }
@@ -205,6 +156,7 @@ class PdfPageData {
   final String summary;
   final List<String> bulletPoints;
   final String keyTakeaway;
+  final String? rawContent;
 
   const PdfPageData({
     required this.pageNumber,
@@ -212,6 +164,7 @@ class PdfPageData {
     required this.summary,
     required this.bulletPoints,
     required this.keyTakeaway,
+    this.rawContent,
   });
 }
 
@@ -694,6 +647,16 @@ class _GoodNotesPdfStudyPanelState extends State<GoodNotesPdfStudyPanel> {
                       ),
                     ),
                   ),
+                if (widget.document.rawBytes != null && widget.document.rawBytes!.isNotEmpty)
+                  Tooltip(
+                    message: 'Open original PDF in browser tab',
+                    child: IconButton(
+                      icon: const Icon(Icons.open_in_new_rounded, size: 18, color: Color(0xFF64748B)),
+                      onPressed: () {
+                        openPdfInBrowserTab(widget.document.rawBytes!, '${widget.document.title}.pdf');
+                      },
+                    ),
+                  ),
                 IconButton(
                   icon: const Icon(Icons.close_rounded, size: 20),
                   tooltip: 'Close Study View',
@@ -923,6 +886,35 @@ class _GoodNotesPdfStudyPanelState extends State<GoodNotesPdfStudyPanel> {
                           ],
                         ),
                       ),
+                      if (curPage.rawContent != null && curPage.rawContent!.trim().isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        Text(
+                          'Full Extracted Text:',
+                          style: GoogleFonts.inter(
+                            fontSize: 12 * _zoom.clamp(0.85, 1.25),
+                            fontWeight: FontWeight.w700,
+                            color: isDark ? Colors.white : const Color(0xFF1E293B),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: isDark ? Colors.white.withValues(alpha: 0.05) : const Color(0xFFF1F5F9),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: borderColor),
+                          ),
+                          child: SelectableText(
+                            curPage.rawContent!.trim(),
+                            style: GoogleFonts.inter(
+                              fontSize: 11 * _zoom.clamp(0.85, 1.25),
+                              height: 1.55,
+                              color: isDark ? Colors.white70 : const Color(0xFF334155),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),

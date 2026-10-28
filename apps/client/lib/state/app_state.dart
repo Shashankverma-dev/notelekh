@@ -21,6 +21,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ai_workspace_client/firebase_options.dart';
+import 'package:ai_workspace_client/core/services/session_cache_helper.dart';
 
 
 enum WorkspaceViewMode {
@@ -70,6 +71,28 @@ class AppState extends ChangeNotifier {
   int selectedNavIndex = 0; // 0: Home/Dashboard, 1: Chats, 2: Workspaces, 3: Canvas, 4: Files, 5: Search, 6: Settings
   bool isDarkMode = false; // Notelekh light-first aesthetic
   final ValueNotifier<bool> darkModeNotifier = ValueNotifier<bool>(false);
+
+  /// Dedicated notifier for top-level application shell (auth, theme, login screen, and main tab navigation).
+  /// Excludes high-frequency canvas/drawing state mutations so committing strokes
+  /// never triggers root MaterialApp or shell rebuilds.
+  final ValueNotifier<int> appShellNotifier = ValueNotifier<int>(0);
+
+  /// Dedicated notifier fired ONLY when canvasObjects changes (stroke commit, undo, clear, etc.).
+  /// CanvasPainter uses this as its `repaint` listenable so it never repaints due to
+  /// toolbar changes, autosave status updates, or nav index changes.
+  final ValueNotifier<int> canvasObjectsNotifier = ValueNotifier<int>(0);
+
+  void notifyAppShell() {
+    appShellNotifier.value++;
+  }
+
+  /// Increments [canvasObjectsNotifier] to trigger a repaint of the committed-stroke layer only.
+  void notifyCanvasObjects() {
+    canvasObjectsNotifier.value++;
+  }
+
+  void _notifyCanvasObjects() => notifyCanvasObjects();
+
   bool isContextPanelVisible = false; // default collapsed in split studio for cleaner focus
   WorkspaceViewMode viewMode = WorkspaceViewMode.canvasOnly;
   double splitRatio = 0.52; // 52% Canvas, 48% AI Chat
@@ -464,7 +487,9 @@ class AppState extends ChangeNotifier {
   void setAutosaveStatus(String status) {
     autosaveStatus = status;
     if (status == 'saved') lastSavedAt = DateTime.now();
-    notifyListeners();
+    // Use appShellNotifier instead of notifyListeners() so that autosave pings
+    // do NOT trigger a full CanvasScreen rebuild during active drawing/writing.
+    notifyAppShell();
   }
 
   // Files State
@@ -477,7 +502,11 @@ class AppState extends ChangeNotifier {
 
   bool isAuthenticated = false;
   bool showLoginScreen = false;
-  bool isAuthRestoring = false;
+
+  static bool get _hasSavedSessionSync => checkSavedSessionSync();
+
+  bool isAuthRestoring = _hasSavedSessionSync;
+  final Set<String> _syncedCloudDocIds = {};
 
   AppState() {
     initWorkspaces();
@@ -486,12 +515,14 @@ class AppState extends ChangeNotifier {
   /// Navigate to the login/sign-in card without entering the workspace.
   void navigateToLogin() {
     showLoginScreen = true;
+    notifyAppShell();
     notifyListeners();
   }
 
   /// Return to the landing page from the login screen.
   void navigateToLanding() {
     showLoginScreen = false;
+    notifyAppShell();
     notifyListeners();
   }
 
@@ -600,6 +631,37 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Safely preserves in-memory and local unauthenticated notebooks before switching to an authenticated user.
+  Future<void> prepareForUserLogin(String targetUid) async {
+    if (targetUid.isEmpty || targetUid == 'local_user' || targetUid == 'anon') return;
+
+    try {
+      // 1. Sync current page objects to ensure latest strokes are included
+      _syncCurrentPageObjects();
+
+      // 2. If there are notebooks in memory right now (e.g. user created one in the current session before logging in),
+      // save them locally under targetUid immediately so they cannot be lost during workspace transition.
+      if (canvasDocs.isNotEmpty) {
+        for (final doc in canvasDocs) {
+          final isUntouchedStarter = (doc.id.startsWith('notebook_default_') ||
+                  doc.id.endsWith('_default') ||
+                  doc.id.contains('_default')) &&
+              doc.pages.every((p) => p.objects.isEmpty);
+          if (isUntouchedStarter) continue;
+          await NotesLocalStorageService.saveDocLocally(doc, userId: targetUid);
+        }
+      }
+
+      // 3. Adopt all local storage documents from unauthenticated sessions (local_user, anon, guest_shared)
+      await NotesLocalStorageService.adoptOrMigrateLocalDocs(
+        targetUserId: targetUid,
+        targetWorkspaceId: currentWorkspace?.id ?? 'default',
+      );
+    } catch (e) {
+      debugPrint('[AUTH-MIGRATE] Error preparing for user login: $e');
+    }
+  }
+
   /// Populate local state from an authenticated [User].
   void _applyFirebaseUser(User user) {
     final bool isUserSwitch = (userId != user.uid);
@@ -617,13 +679,16 @@ class AppState extends ChangeNotifier {
     showLoginScreen = false;
     isAuthRestoring = false;
 
-    // Purge any stale/unauthenticated workspace & notebook state from memory on user switch
+    // Persist authenticated user session flag so web reload can wait for credentials from IndexedDB
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setBool('notelekh_has_user_session', true);
+      prefs.setString('notelekh_last_user_id', user.uid);
+    }).catchError((_) {});
+
+    // Purge stale workspace & chat state from memory on user switch
     if (isUserSwitch) {
       workspaces.clear();
       currentWorkspace = null;
-      canvasDocs.clear();
-      currentCanvasDoc = null;
-      canvasObjects.clear();
       conversations.clear();
       currentConversation = null;
       currentMessages.clear();
@@ -634,6 +699,7 @@ class AppState extends ChangeNotifier {
     if (workspaces.isNotEmpty) {
       currentWorkspace ??= workspaces.first;
     }
+    notifyAppShell();
   }
 
   /// Sign in with email + password. Returns null on success, error message on failure.
@@ -654,12 +720,11 @@ class AppState extends ChangeNotifier {
       final cUser = cred.user;
       if (cUser != null) {
         debugPrint('[AUTH-SIGNIN] Sign-in SUCCESS: UID=${cUser.uid}');
-        await resetWorkspace();
+        await prepareForUserLogin(cUser.uid);
         _applyFirebaseUser(cUser);
-        notifyListeners(); // Show workspace immediately — don't block on workspace load
-        loadUserWorkspaces().catchError((e) {
-          debugPrint('[AUTH-SIGNIN] loadUserWorkspaces after sign-in non-fatal error: $e');
-        });
+        await loadUserWorkspaces();
+        notifyAppShell();
+        notifyListeners(); // Show workspace and loaded notebooks immediately
         debugPrint('[AUTH-SIGNIN] COMPLETE');
         return null;
       }
@@ -728,14 +793,12 @@ class AppState extends ChangeNotifier {
             debugPrint('[AUTH-SIGNUP] updateDisplayName non-fatal error: $e');
           });
         }
-        await resetWorkspace();
+        await prepareForUserLogin(cUser.uid);
         _applyFirebaseUser(cUser);
         if (name.trim().isNotEmpty) displayName = name.trim();
-        notifyListeners(); // Show workspace immediately
-        debugPrint('[AUTH-SIGNUP] Local user state applied. Launching workspace load...');
-        loadUserWorkspaces().catchError((e) {
-          debugPrint('[AUTH-SIGNUP] loadUserWorkspaces non-fatal error: $e');
-        });
+        await loadUserWorkspaces();
+        notifyAppShell();
+        notifyListeners(); // Show workspace and loaded notebooks immediately
         debugPrint('[AUTH-SIGNUP] COMPLETE');
         return null;
       }
@@ -805,8 +868,11 @@ class AppState extends ChangeNotifier {
         ..addScope('profile')
         ..setCustomParameters({'prompt': 'select_account'});
 
-      UserCredential credential;
+      UserCredential? credential;
       try {
+        if (kIsWeb) {
+          await NotesLocalStorageService.pruneStorageIfNearQuota(maxTotalChars: 2000000);
+        }
         credential = await FirebaseAuth.instance.signInWithPopup(provider);
       } on FirebaseAuthException catch (e, st) {
         debugPrint('[AUTH-GOOGLE] signInWithPopup FirebaseAuthException: code=${e.code} message=${e.message}');
@@ -814,7 +880,29 @@ class AppState extends ChangeNotifier {
           debugPrint('[AUTH-GOOGLE] Popup dismissed by user.');
           return null; // User simply closed the popup, not an error
         }
-        if (e.code == 'popup-blocked' || e.code == 'web-storage-unsupported') {
+
+        // Auto-recover from browser storage quota exceeded
+        final isQuota = e.toString().toLowerCase().contains('quota') ||
+                        (e.message != null && e.message!.toLowerCase().contains('quota')) ||
+                        e.toString().toLowerCase().contains('setitem');
+        if (isQuota) {
+          debugPrint('[AUTH-GOOGLE] Storage quota exceeded. Emergency pruning and retrying signInWithPopup...');
+          await NotesLocalStorageService.emergencyPruneStorage();
+          try {
+            credential = await FirebaseAuth.instance.signInWithPopup(provider);
+          } catch (retryErr, rSt) {
+            debugPrint('[AUTH-GOOGLE] Retry after quota clearing failed: $retryErr');
+            lastAuthDiagnostic = AuthDiagnosticInfo(
+              stage: 'signInWithPopup:quotaRetry',
+              exceptionType: retryErr.runtimeType.toString(),
+              code: (retryErr is FirebaseAuthException) ? retryErr.code : null,
+              message: (retryErr is FirebaseAuthException) ? retryErr.message : retryErr.toString(),
+              rawException: retryErr.toString(),
+              stackTraceSnippet: rSt.toString().split('\n').take(8).join('\n'),
+            );
+            return _authErrorMessage(retryErr);
+          }
+        } else if (e.code == 'popup-blocked' || e.code == 'web-storage-unsupported') {
           debugPrint('[AUTH-GOOGLE] Popup blocked, falling back to signInWithRedirect...');
           try {
             final prefs = await SharedPreferences.getInstance();
@@ -826,50 +914,71 @@ class AppState extends ChangeNotifier {
             debugPrint('[AUTH-GOOGLE] Stack: $rSt');
             return _authErrorMessage(redirectErr);
           }
+        } else {
+          lastAuthDiagnostic = AuthDiagnosticInfo(
+            stage: 'signInWithPopup',
+            exceptionType: e.runtimeType.toString(),
+            code: e.code,
+            message: e.message,
+            rawException: e.toString(),
+            stackTraceSnippet: st.toString().split('\n').take(8).join('\n'),
+          );
+          return _authErrorMessage(e);
         }
-        lastAuthDiagnostic = AuthDiagnosticInfo(
-          stage: 'signInWithPopup',
-          exceptionType: e.runtimeType.toString(),
-          code: e.code,
-          message: e.message,
-          rawException: e.toString(),
-          stackTraceSnippet: st.toString().split('\n').take(8).join('\n'),
-        );
-        return _authErrorMessage(e);
       } catch (e, st) {
         debugPrint('[AUTH-GOOGLE] Generic signInWithPopup error: $e');
         final code = _extractFirebaseCode(e);
         if (code == 'popup-closed-by-user' || code == 'cancelled-popup-request') {
           return null;
         }
-        if (code == 'popup-blocked') {
+
+        final isQuota = e.toString().toLowerCase().contains('quota') ||
+                        e.toString().toLowerCase().contains('setitem');
+        if (isQuota) {
+          debugPrint('[AUTH-GOOGLE] Storage quota exceeded in generic catch. Emergency pruning and retrying...');
+          await NotesLocalStorageService.emergencyPruneStorage();
+          try {
+            credential = await FirebaseAuth.instance.signInWithPopup(provider);
+          } catch (retryErr, rSt) {
+            debugPrint('[AUTH-GOOGLE] Generic retry after quota clearing failed: $retryErr');
+            lastAuthDiagnostic = AuthDiagnosticInfo(
+              stage: 'signInWithPopup:quotaRetry',
+              exceptionType: retryErr.runtimeType.toString(),
+              code: _extractFirebaseCode(retryErr),
+              message: retryErr.toString(),
+              rawException: retryErr.toString(),
+              stackTraceSnippet: rSt.toString().split('\n').take(8).join('\n'),
+            );
+            return _authErrorMessage(retryErr);
+          }
+        } else if (code == 'popup-blocked') {
           try {
             final prefs = await SharedPreferences.getInstance();
             await prefs.setBool('notelekh_pending_auth_redirect', true);
             await FirebaseAuth.instance.signInWithRedirect(provider);
             return null;
           } catch (_) {}
+        } else {
+          lastAuthDiagnostic = AuthDiagnosticInfo(
+            stage: 'signInWithPopup',
+            exceptionType: e.runtimeType.toString(),
+            code: code,
+            message: e.toString(),
+            rawException: e.toString(),
+            stackTraceSnippet: st.toString().split('\n').take(8).join('\n'),
+          );
+          return _authErrorMessage(e);
         }
-        lastAuthDiagnostic = AuthDiagnosticInfo(
-          stage: 'signInWithPopup',
-          exceptionType: e.runtimeType.toString(),
-          code: code,
-          message: e.toString(),
-          rawException: e.toString(),
-          stackTraceSnippet: st.toString().split('\n').take(8).join('\n'),
-        );
-        return _authErrorMessage(e);
       }
 
-      final user = credential.user;
+      final user = credential?.user;
       if (user != null) {
         debugPrint('[AUTH-GOOGLE] Popup sign-in SUCCESS: UID=${user.uid} (${user.email})');
-        await resetWorkspace();
+        await prepareForUserLogin(user.uid);
         _applyFirebaseUser(user);
-        notifyListeners(); // Directly transitions into ResponsiveShell (Workspace Dashboard)!
-        loadUserWorkspaces().catchError((e) {
-          debugPrint('[AUTH-GOOGLE] loadUserWorkspaces after Google popup non-fatal error: $e');
-        });
+        await loadUserWorkspaces();
+        notifyAppShell();
+        notifyListeners(); // Directly transitions into ResponsiveShell with notebooks loaded
         return null;
       }
       return 'Google sign-in could not retrieve user profile.';
@@ -922,7 +1031,9 @@ class AppState extends ChangeNotifier {
           code = 'popup-closed-by-user';
         } else if (s.contains('redirect_uri_mismatch')) {
           code = 'redirect-uri-mismatch';
-        } else if (s.contains('storage') || s.contains('quota') || s.contains('insecure')) {
+        } else if (s.contains('quota') || s.contains('setitem')) {
+          code = 'storage-quota-exceeded';
+        } else if (s.contains('storage') || s.contains('insecure')) {
           code = 'web-storage-unsupported';
         } else if (s.contains('duplicate-app')) {
           code = 'core/duplicate-app';
@@ -932,6 +1043,8 @@ class AppState extends ChangeNotifier {
     }
     debugPrint('[AUTH-ERROR] code=$code rawMessage=$message');
     switch (code) {
+      case 'storage-quota-exceeded':
+        return 'Browser storage quota was exceeded. We cleared the local document cache — please tap "Continue with Google" again.';
       case 'unauthorized-domain':
         return 'Domain is not authorized in Firebase Console (Authentication > Settings > Authorized domains).';
       case 'redirect-uri-mismatch':
@@ -963,6 +1076,9 @@ class AppState extends ChangeNotifier {
       case 'user-disabled':
         return 'This account has been disabled. Contact support.';
       case 'internal-error':
+        if (message != null && (message.toLowerCase().contains('quota') || message.toLowerCase().contains('setitem'))) {
+          return 'Browser storage quota was exceeded. We cleared the local document cache — please tap "Continue with Google" again.';
+        }
         return 'A server error occurred. Please try again in a moment.';
       case 'core/duplicate-app':
         return 'Application initialization in progress. Please try again.';
@@ -995,12 +1111,18 @@ class AppState extends ChangeNotifier {
     if (workspaces.isEmpty) {
       await loadUserWorkspaces();
     }
+    notifyAppShell();
     notifyListeners();
   }
 
   Future<void> signOut() async {
     try {
       await FirebaseAuth.instance.signOut();
+    } catch (_) {}
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('notelekh_has_user_session');
+      await prefs.remove('notelekh_last_user_id');
     } catch (_) {}
     _canvasDocsSubscription?.cancel();
     _canvasDocsSubscription = null;
@@ -1013,6 +1135,7 @@ class AppState extends ChangeNotifier {
     userPhotoUrl = null;
     await resetWorkspace();
     workspaceFiles = _getDefaultWorkspaceFiles('default');
+    notifyAppShell();
     notifyListeners();
   }
 
@@ -1020,24 +1143,40 @@ class AppState extends ChangeNotifier {
 
   Future<void> initWorkspaces() async {
     try {
-      // 1. Check if user is returning from a Google redirect
-      bool isPendingRedirect = false;
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        isPendingRedirect = prefs.getBool('notelekh_pending_auth_redirect') ?? false;
-        if (isPendingRedirect) {
-          isAuthRestoring = true;
-          notifyListeners();
-        }
-      } catch (_) {}
+      final prefs = await SharedPreferences.getInstance();
+      final bool hasUserSession = prefs.getBool('notelekh_has_user_session') ?? false;
+      final bool isPendingRedirect = prefs.getBool('notelekh_pending_auth_redirect') ?? false;
+
+      // ── ULTRA-FAST PATH FOR UNAUTHENTICATED VISITORS (Landing Screen) ──
+      // Immediately present the interactive landing page without blocking on
+      // Firebase initialization or waiting for authState timeouts!
+      if (!isPendingRedirect && !hasUserSession) {
+        isAuthRestoring = false;
+        userId ??= 'local_user';
+        displayName = 'Notelekh User';
+        userEmail = '';
+        notifyAppShell();
+        notifyListeners();
+
+        // Warm up Firebase in background so it's ready when user opens Sign-In
+        _ensureFirebase().catchError((e) {
+          debugPrint('[AUTH-INIT] Background Firebase warmup: $e');
+        });
+        _startAuthListener();
+        return;
+      }
+
+      // ── RESTORING SESSION / REDIRECT CALLBACK PATH (Workspace Skeleton) ──
+      isAuthRestoring = true;
+      notifyAppShell();
+      notifyListeners();
 
       debugPrint('[AUTH-INIT] Fast-initializing Firebase...');
       await _ensureFirebase();
 
-      // 2. Only query getRedirectResult if an actual redirect was flagged
+      // 2. Query getRedirectResult only if redirect was pending
       if (kIsWeb && isPendingRedirect) {
         try {
-          final prefs = await SharedPreferences.getInstance();
           await prefs.remove('notelekh_pending_auth_redirect');
         } catch (_) {}
 
@@ -1048,40 +1187,54 @@ class AppState extends ChangeNotifier {
 
           if (redirectResult.user != null) {
             debugPrint('[AUTH-REDIRECT] Redirect completed: ${redirectResult.user!.email}');
-            isAuthRestoring = false;
-            await resetWorkspace();
+            await prepareForUserLogin(redirectResult.user!.uid);
             _applyFirebaseUser(redirectResult.user!);
-            notifyListeners(); // SHOW WORKSPACE IMMEDIATELY — ZERO DELAY!
+            isAuthRestoring = false;
+            notifyAppShell();
+            notifyListeners();
+            await loadUserWorkspaces();
             _startAuthListener();
-            loadUserWorkspaces().catchError((e) {
-              debugPrint('[AUTH-REDIRECT] loadUserWorkspaces non-fatal error: $e');
-            });
             return;
           }
         } catch (e) {
           debugPrint('[AUTH-REDIRECT] getRedirectResult non-fatal: $e');
         }
-        isAuthRestoring = false;
       }
 
-      // 3. Immediately restore existing user session with zero delay
-      final existingUser = FirebaseAuth.instance.currentUser;
+      // 3. Immediately restore existing user session (wait on IndexedDB on Web)
+      User? existingUser = FirebaseAuth.instance.currentUser;
+      if (existingUser == null && kIsWeb) {
+        try {
+          // IndexedDB read is fast (50-150ms). Cap timeout at 300ms to eliminate stalling.
+          existingUser = await FirebaseAuth.instance
+              .authStateChanges()
+              .firstWhere((u) => u != null)
+              .timeout(const Duration(milliseconds: 300));
+        } catch (_) {}
+      }
+
       if (existingUser != null) {
         debugPrint('[AUTH-STATE] Existing session active: ${existingUser.email}');
-        await resetWorkspace();
+        await prepareForUserLogin(existingUser.uid);
         _applyFirebaseUser(existingUser);
         isAuthRestoring = false;
-        notifyListeners(); // SHOW WORKSPACE IMMEDIATELY — ZERO DELAY!
+        notifyAppShell();
+        notifyListeners(); // UI immediately switches from Skeleton to ResponsiveShell!
+        await loadUserWorkspaces();
         _startAuthListener();
-        loadUserWorkspaces().catchError((e) {
-          debugPrint('[AUTH-STATE] loadUserWorkspaces non-fatal: $e');
-        });
         return;
       } else {
+        if (hasUserSession) {
+          await prefs.remove('notelekh_has_user_session');
+          await prefs.remove('notelekh_last_user_id');
+        }
         userId ??= 'local_user';
         displayName = 'Notelekh User';
         userEmail = '';
         isAuthRestoring = false;
+        notifyAppShell();
+        notifyListeners();
+        await loadUserWorkspaces();
       }
 
       _startAuthListener();
@@ -1090,27 +1243,31 @@ class AppState extends ChangeNotifier {
       debugPrint('[AUTH-STATE] Stack: $st');
       userId ??= 'local_user';
       isAuthRestoring = false;
+      notifyAppShell();
+      notifyListeners();
+      await loadUserWorkspaces();
     }
 
-    if (isAuthenticated) {
+    if (isAuthenticated && workspaces.isEmpty) {
       loadUserWorkspaces().catchError((e) {
         debugPrint('[AUTH-STATE] Background initial workspace load: $e');
       });
     }
+    notifyAppShell();
     notifyListeners();
   }
 
   void _startAuthListener() {
     _authStateSubscription?.cancel();
     _authStateSubscription = FirebaseAuth.instance.authStateChanges().listen(
-      (user) {
+      (user) async {
         if (user != null && (!isAuthenticated || userId != user.uid)) {
           debugPrint('[Auth] authStateChanges: signed in as ${user.email}');
+          await prepareForUserLogin(user.uid);
           _applyFirebaseUser(user);
-          notifyListeners(); // SHOW WORKSPACE IMMEDIATELY — ZERO DELAY!
-          loadUserWorkspaces().catchError((e) {
-            debugPrint('[Auth] loadUserWorkspaces background error: $e');
-          });
+          await loadUserWorkspaces();
+          notifyAppShell();
+          notifyListeners();
         } else if (user == null && isAuthenticated) {
           debugPrint('[Auth] authStateChanges: signed out');
         }
@@ -1147,26 +1304,11 @@ class AppState extends ChangeNotifier {
   void _deduplicateWorkspaces() {
     final Map<String, WorkspaceModel> seen = {};
     final List<WorkspaceModel> unique = [];
-    bool hasMyWorkspace = false;
     for (final ws in workspaces) {
       if (ws.id.startsWith('default_')) continue;
       if (seen.containsKey(ws.id)) continue;
       seen[ws.id] = ws;
-
-      final isDefaultWs = ws.name.trim().toLowerCase() == 'my workspace' || ws.name.trim().toLowerCase() == 'default workspace';
-      if (isDefaultWs) {
-        if (!hasMyWorkspace) {
-          hasMyWorkspace = true;
-          unique.add(ws);
-        } else {
-          // Extra duplicate default workspace: delete from Firestore in background
-          if (userId != null && userId != 'local_user') {
-            firestoreService.deleteWorkspace(userId!, ws.id).catchError((_) {});
-          }
-        }
-      } else {
-        unique.add(ws);
-      }
+      unique.add(ws);
     }
     workspaces = unique;
   }
@@ -1194,7 +1336,26 @@ class AppState extends ChangeNotifier {
       await fetchWorkspaces();
       _deduplicateWorkspaces();
       if (workspaces.isNotEmpty) {
-        await selectWorkspace(workspaces.first);
+        WorkspaceModel targetWs;
+        if (currentWorkspace != null) {
+          if (workspaces.any((w) => w.id == currentWorkspace!.id)) {
+            targetWs = workspaces.firstWhere((w) => w.id == currentWorkspace!.id);
+          } else {
+            workspaces.insert(0, currentWorkspace!);
+            targetWs = currentWorkspace!;
+          }
+        } else {
+          targetWs = workspaces.first;
+          // If multiple workspaces exist, check if any workspace already has local notes
+          for (final ws in workspaces) {
+            final local = await NotesLocalStorageService.loadDocsForWorkspace(ws.id, userId: userId);
+            if (local.isNotEmpty) {
+              targetWs = ws;
+              break;
+            }
+          }
+        }
+        await selectWorkspace(targetWs);
       } else {
         // Create initial starter workspace for this user (exactly 1 workspace)
         await createWorkspace(
@@ -1212,6 +1373,7 @@ class AppState extends ChangeNotifier {
     }
 
     computeAccountStorage(forceCloudSync: true);
+    notifyAppShell();
     notifyListeners();
   }
 
@@ -1220,6 +1382,7 @@ class AppState extends ChangeNotifier {
 
   void toggleNotebookSidebar() {
     isNotebookSidebarVisible = !isNotebookSidebarVisible;
+    notifyAppShell();
     notifyListeners();
   }
 
@@ -1229,12 +1392,14 @@ class AppState extends ChangeNotifier {
     if (index == 1) {
       isNotebookSidebarVisible = false;
     }
+    notifyAppShell();
     notifyListeners();
   }
 
   void toggleTheme() {
     isDarkMode = !isDarkMode;
     darkModeNotifier.value = isDarkMode;
+    notifyAppShell();
     notifyListeners();
   }
 
@@ -1259,7 +1424,27 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     try {
       if (userId == null) return;
-      final loaded = await firestoreService.getWorkspaces(userId!);
+      List<WorkspaceModel> loaded = [];
+      if (userId != 'local_user' && !userId!.startsWith('guest_')) {
+        try {
+          loaded = await firestoreService.getWorkspaces(userId!);
+        } catch (e) {
+          debugPrint('Error fetching workspaces from Firestore: $e');
+        }
+      }
+      if (loaded.isEmpty) {
+        loaded = [
+          WorkspaceModel(
+            id: 'default',
+            userId: userId!,
+            name: 'My Workspace',
+            description: 'Personal notes & workspace',
+            icon: 'book',
+            createdAt: DateTime.now(),
+            updatedAt: DateTime.now(),
+          )
+        ];
+      }
       workspaces = loaded;
       _deduplicateWorkspaces();
     } catch (e) {
@@ -1287,15 +1472,33 @@ class AppState extends ChangeNotifier {
         }
       }
 
-      final ws = await firestoreService.createWorkspace(
+      WorkspaceModel? ws;
+      if (userId != 'local_user' && !userId!.startsWith('guest_')) {
+        try {
+          ws = await firestoreService.createWorkspace(
+            userId: userId!,
+            name: name,
+            description: description,
+            icon: icon,
+          );
+        } catch (e) {
+          debugPrint('Firestore createWorkspace error: $e');
+        }
+      }
+
+      ws ??= WorkspaceModel(
+        id: 'ws_${DateTime.now().millisecondsSinceEpoch}',
         userId: userId!,
         name: name,
         description: description,
         icon: icon,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
       );
+
       // Remove any temporary unpersisted starter workspace (e.g. 'default_${user.uid}')
       workspaces.removeWhere((w) => w.id.startsWith('default_'));
-      if (!workspaces.any((w) => w.id == ws.id)) {
+      if (!workspaces.any((w) => w.id == ws!.id)) {
         workspaces.insert(0, ws);
       }
       _deduplicateWorkspaces();
@@ -1371,17 +1574,22 @@ class AppState extends ChangeNotifier {
     if (currentCanvasDoc != null && userId != null && userId != 'local_user' && !currentCanvasDoc!.id.startsWith('notebook_default_')) {
       NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
     }
+    final bool isSwitchingWorkspace = currentWorkspace?.id != ws.id;
     currentWorkspace = ws;
-    // Clear canvasDocs so docs from previous workspace or temporary starter don't cross-contaminate
-    canvasDocs = [];
-    currentCanvasDoc = null;
-    canvasObjects = [];
-    notifyListeners();
+    // Clear canvasDocs only when actually switching to a different workspace so existing docs aren't wiped
+    if (isSwitchingWorkspace) {
+      canvasDocs = [];
+      currentCanvasDoc = null;
+      canvasObjects = [];
+      notifyListeners();
+    }
     await Future.wait([
       fetchWorkspaceConversations(ws.id),
       fetchWorkspaceCanvasDocs(ws.id),
       fetchWorkspaceFiles(ws.id),
     ]);
+    notifyAppShell();
+    notifyListeners();
   }
 
   // ================= CONVERSATIONS & STREAMING =================
@@ -1557,38 +1765,54 @@ class AppState extends ChangeNotifier {
   List<CanvasDocModel> _deduplicateStarterNotebooks(List<CanvasDocModel> docs, String workspaceId) {
     if (docs.length <= 1) return docs;
 
-    final personalNotes = docs.where(
-      (d) => d.name.trim().toLowerCase() == 'personal notes' || d.name.trim().toLowerCase() == 'notebook 1',
-    ).toList();
+    // A starter notebook candidate is one that:
+    // 1. Matches starter ID pattern (notebook_default_, _default, etc.) OR has default starter name ('Personal Notes')
+    // AND 2. Has ZERO drawings/objects on every page.
+    // Note: User-created notebooks with distinct names (e.g. 'Notebook 1', 'Notebook 2', custom names) are NOT starter duplicates.
+    final emptyStarterCandidates = docs.where((d) {
+      final nameLower = d.name.trim().toLowerCase();
+      final isStarterNameOrId = nameLower == 'personal notes' ||
+          d.id.startsWith('notebook_default_') ||
+          d.id.endsWith('_default') ||
+          d.id.contains('_default');
+      final hasNoDrawings = d.pages.every((p) => p.objects.isEmpty);
+      return isStarterNameOrId && hasNoDrawings;
+    }).toList();
 
-    if (personalNotes.length <= 1) return docs;
+    if (emptyStarterCandidates.isEmpty) return docs;
 
-    // Sort descending by content so the notebook with the most user drawings/pages is preserved:
-    personalNotes.sort((a, b) {
-      final aObjCount = a.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
-      final bObjCount = b.pages.fold<int>(0, (sum, p) => sum + p.objects.length);
-      if (aObjCount != bObjCount) return bObjCount.compareTo(aObjCount);
-      if (a.pages.length != b.pages.length) return b.pages.length.compareTo(a.pages.length);
-      return a.id.compareTo(b.id);
-    });
+    // If real notebooks exist (with content or user-created distinct names), remove empty starter placeholders.
+    // If all are duplicate empty starters, keep exactly 1.
+    final hasRealDocs = docs.any((d) => !emptyStarterCandidates.contains(d));
+    final startersToRemove = hasRealDocs
+        ? emptyStarterCandidates
+        : (emptyStarterCandidates.length > 1 ? emptyStarterCandidates.sublist(1) : <CanvasDocModel>[]);
 
-    final toRemove = personalNotes.sublist(1);
+    if (startersToRemove.isEmpty) return docs;
+
     final updated = List<CanvasDocModel>.from(docs);
-    for (final dup in toRemove) {
+    for (final dup in startersToRemove) {
       updated.removeWhere((d) => d.id == dup.id);
       if (userId != null && userId != 'local_user') {
         NotesLocalStorageService.deleteDocLocally(dup.id, userId: userId);
-        if (isAuthenticated) {
-          try {
-            firestoreService.deleteCanvasDoc(userId!, workspaceId, dup.id).catchError((_) {});
-          } catch (_) {}
-        }
       }
     }
     return updated;
   }
 
   Future<void> _doFetchWorkspaceCanvasDocs(String workspaceId) async {
+    // 0. Automatically adopt / migrate any local unauthenticated docs to this user & workspace
+    if (userId != null && userId != 'local_user') {
+      try {
+        await NotesLocalStorageService.adoptOrMigrateLocalDocs(
+          targetUserId: userId!,
+          targetWorkspaceId: workspaceId,
+        );
+      } catch (e) {
+        debugPrint('[MIGRATION] Non-fatal local doc adoption error: $e');
+      }
+    }
+
     // 1. Immediately hydrate from local storage for this specific workspace
     try {
       var wsLocalDocs = await NotesLocalStorageService.loadDocsForWorkspace(workspaceId, userId: userId);
@@ -1609,6 +1833,7 @@ class AppState extends ChangeNotifier {
         canvasObjects = List.from(currentCanvasDoc!.activePage.objects);
         isPageViewMode = currentCanvasDoc!.docType != CanvasDocType.canvas;
       }
+      notifyAppShell();
       notifyListeners();
     } catch (e) {
       debugPrint('Error loading local docs on startup: $e');
@@ -1617,13 +1842,43 @@ class AppState extends ChangeNotifier {
     // 2. Intelligent zero-data-loss cloud merge in background
     try {
       if (userId == null) return;
-      final cloudDocs = await firestoreService.getWorkspaceCanvasDocs(userId!, workspaceId);
+      var cloudDocs = await firestoreService.getWorkspaceCanvasDocs(userId!, workspaceId);
+
+      // If cloud docs for this workspace is empty, check if user had docs in 'default' workspace in Firestore,
+      // or across any workspace in Firestore
+      if (cloudDocs.isEmpty) {
+        if (workspaceId != 'default') {
+          final defaultCloudDocs = await firestoreService.getWorkspaceCanvasDocs(userId!, 'default');
+          if (defaultCloudDocs.isNotEmpty) {
+            cloudDocs = defaultCloudDocs;
+            for (final doc in defaultCloudDocs) {
+              doc.workspaceId = workspaceId;
+              await firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+            }
+          }
+        }
+        if (cloudDocs.isEmpty) {
+          final allCloud = await firestoreService.getAllUserCanvasDocs(userId!);
+          if (allCloud.isNotEmpty) {
+            cloudDocs = allCloud;
+            for (final doc in allCloud) {
+              doc.workspaceId = workspaceId;
+              await firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+            }
+          }
+        }
+      }
+
       if (cloudDocs.isNotEmpty) {
         // Synchronize in-memory changes to current active doc first
         _syncCurrentPageObjects();
 
         // Build a merged document list: newer documents (by updated_at timestamp or content) win
         final Map<String, CanvasDocModel> mergedDocs = {};
+        final allLocalDocs = await NotesLocalStorageService.loadAllDocsLocally(userId: userId);
+        for (final localDoc in allLocalDocs) {
+          mergedDocs[localDoc.id] = localDoc;
+        }
         for (final localDoc in canvasDocs) {
           mergedDocs[localDoc.id] = localDoc;
         }
@@ -1631,6 +1886,7 @@ class AppState extends ChangeNotifier {
         final Set<String> docsNeedingCloudPush = {};
 
         for (final cloudDoc in cloudDocs) {
+          _syncedCloudDocIds.add(cloudDoc.id);
           final localDoc = mergedDocs[cloudDoc.id];
           if (localDoc == null) {
             // New doc from cloud
@@ -1698,35 +1954,59 @@ class AppState extends ChangeNotifier {
             firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
           }
         }
-      } else if (canvasDocs.isNotEmpty) {
-        // Cloud has no docs for this workspace yet, but local docs exist:
-        canvasDocs = _deduplicateStarterNotebooks(canvasDocs, workspaceId);
-
-        // Push local notebooks to Firestore so cloud database is populated
-        for (final doc in canvasDocs) {
-          NotesLocalStorageService.saveDocLocally(doc, userId: userId);
-          await firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
-        }
       } else {
-        // Both cloud and local are empty: create EXACTLY 1 default notebook 'Personal Notes'
-        final defaultNotebookId = 'notebook_${workspaceId}_default';
-        final defaultNotebook = CanvasDocModel(
-          id: defaultNotebookId,
-          workspaceId: workspaceId,
-          name: 'Personal Notes',
-          docType: CanvasDocType.notebook,
-          coverColor: const Color(0xFF2E7D32),
-          coverEmoji: '📓',
-        );
-        canvasDocs = [defaultNotebook];
-        currentCanvasDoc = defaultNotebook;
-        currentPageIndex = 0;
-        canvasPaperStyle = CanvasPaperStyle.ruledLines;
-        isPageViewMode = true;
-        canvasObjects = [];
-        if (userId != null && userId != 'local_user') {
-          NotesLocalStorageService.saveDocLocally(defaultNotebook, userId: userId);
-          await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
+        // Cloud has no docs for this workspace yet: check local storage across all scopes
+        final allLocalDocs = await NotesLocalStorageService.loadAllDocsLocally(userId: userId);
+        final Map<String, CanvasDocModel> localMap = {};
+        for (final d in allLocalDocs) {
+          localMap[d.id] = d;
+        }
+        for (final d in canvasDocs) {
+          localMap[d.id] = d;
+        }
+        if (localMap.isNotEmpty) {
+          canvasDocs = _deduplicateStarterNotebooks(localMap.values.toList(), workspaceId);
+
+          // Push local notebooks to Firestore so cloud database is populated
+          for (final doc in canvasDocs) {
+            doc.workspaceId = workspaceId;
+            NotesLocalStorageService.saveDocLocally(doc, userId: userId);
+            if (userId != null && userId != 'local_user') {
+              firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+            }
+          }
+          final activeId = currentCanvasDoc?.id;
+          if (activeId != null && canvasDocs.any((d) => d.id == activeId)) {
+            currentCanvasDoc = canvasDocs.firstWhere((d) => d.id == activeId);
+          } else {
+            currentCanvasDoc = canvasDocs.first;
+          }
+          currentPageIndex = currentCanvasDoc!.currentPageIndex.clamp(0, currentCanvasDoc!.pages.length - 1);
+          canvasPaperStyle = currentCanvasDoc!.activePage.paperStyle;
+          canvasObjects = List.from(currentCanvasDoc!.activePage.objects);
+          isPageViewMode = currentCanvasDoc!.docType != CanvasDocType.canvas;
+          notifyListeners();
+        } else {
+          // Both cloud and local are truly empty: create EXACTLY 1 default notebook 'Personal Notes'
+          final defaultNotebookId = 'notebook_${workspaceId}_default';
+          final defaultNotebook = CanvasDocModel(
+            id: defaultNotebookId,
+            workspaceId: workspaceId,
+            name: 'Personal Notes',
+            docType: CanvasDocType.notebook,
+            coverColor: const Color(0xFF2E7D32),
+            coverEmoji: '📓',
+          );
+          canvasDocs = [defaultNotebook];
+          currentCanvasDoc = defaultNotebook;
+          currentPageIndex = 0;
+          canvasPaperStyle = CanvasPaperStyle.ruledLines;
+          isPageViewMode = true;
+          canvasObjects = [];
+          if (userId != null && userId != 'local_user') {
+            NotesLocalStorageService.saveDocLocally(defaultNotebook, userId: userId);
+            await firestoreService.saveCanvasDoc(userId!, workspaceId, defaultNotebook);
+          }
         }
       }
 
@@ -1743,9 +2023,10 @@ class AppState extends ChangeNotifier {
       }
 
       computeAccountStorage(forceCloudSync: true);
+      notifyAppShell();
       notifyListeners();
     } catch (e) {
-      debugPrint('Error fetching canvas docs from cloud: $e');
+      debugPrint('Error syncing cloud docs on startup: $e');
     }
   }
 
@@ -1758,7 +2039,55 @@ class AppState extends ChangeNotifier {
     bool hasAnyChange = false;
     final Map<String, CanvasDocModel> docMap = {for (var d in canvasDocs) d.id: d};
 
+    // 1. Detect and apply real-time cloud deletions (notebooks deleted remotely)
+    if (liveDocs.isNotEmpty) {
+      final Set<String> liveIds = liveDocs.map((d) => d.id).toSet();
+      final List<String> toRemoveIds = [];
+      for (final doc in canvasDocs) {
+        if (!liveIds.contains(doc.id)) {
+          if (_syncedCloudDocIds.contains(doc.id)) {
+            // Document previously confirmed to exist in the cloud is now missing -> remote deletion
+            toRemoveIds.add(doc.id);
+          } else {
+            // Local notebook that hasn't synced yet -> upload to cloud, NEVER delete!
+            firestoreService.saveCanvasDoc(userId!, workspaceId, doc);
+          }
+        }
+      }
+
+      if (toRemoveIds.isNotEmpty) {
+        hasAnyChange = true;
+        for (final removedId in toRemoveIds) {
+          canvasDocs.removeWhere((d) => d.id == removedId);
+          docMap.remove(removedId);
+          _syncedCloudDocIds.remove(removedId);
+          NotesLocalStorageService.deleteDocEverywhere(removedId, userId: userId);
+        }
+        if (currentCanvasDoc != null && toRemoveIds.contains(currentCanvasDoc!.id)) {
+          if (canvasDocs.isNotEmpty) {
+            switchNotebook(canvasDocs.first.id);
+          } else {
+            final fallback = CanvasDocModel(
+              id: 'notebook_${DateTime.now().millisecondsSinceEpoch}',
+              name: 'Notebook 1',
+              workspaceId: workspaceId,
+              pages: [CanvasPage(id: 'page_1', pageNumber: 1, title: 'Page 1')],
+            );
+            canvasDocs.add(fallback);
+            currentCanvasDoc = fallback;
+            currentPageIndex = 0;
+            canvasPaperStyle = fallback.activePage.paperStyle;
+            canvasObjects = [];
+            isPageViewMode = true;
+            NotesLocalStorageService.saveDocLocally(fallback, userId: userId);
+          }
+        }
+      }
+    }
+
+    // 2. Track synced cloud IDs and handle updates/additions
     for (final liveDoc in liveDocs) {
+      _syncedCloudDocIds.add(liveDoc.id);
       final local = docMap[liveDoc.id];
       if (local == null) {
         // Document created on another device
@@ -1781,12 +2110,34 @@ class AppState extends ChangeNotifier {
         }
 
         if (isLiveNewer) {
-          // If user on this device is actively drawing a stroke right at this millisecond,
-          // do not interrupt their in-flight stroke.
-          final isActivelyDrawingThisDoc = (currentCanvasDoc?.id == liveDoc.id) &&
-              (_canvasSyncTimer?.isActive == true || _localSaveTimer?.isActive == true);
-          if (isActivelyDrawingThisDoc) {
-            continue;
+          // Guard: never replace locally-committed strokes with a cloud snapshot
+          // that has fewer objects on the active page.
+          //
+          // The previous guard only checked _canvasSyncTimer?.isActive, which is
+          // only set 1200ms after a stroke is committed. A Firestore update
+          // arriving in that window would silently overwrite the local stroke.
+          //
+          // Correct guard: if this is the active doc AND the local page has more
+          // objects than the incoming cloud page, the user has uncommitted local
+          // changes — skip the overwrite entirely. The next _debouncePersist()
+          // will push the authoritative local state to cloud.
+          if (currentCanvasDoc?.id == liveDoc.id) {
+            final localPageCount = (currentPageIndex < (currentCanvasDoc?.pages.length ?? 0))
+                ? currentCanvasDoc!.pages[currentPageIndex].objects.length
+                : 0;
+            final livePageCount = (currentPageIndex < liveDoc.pages.length)
+                ? liveDoc.pages[currentPageIndex].objects.length
+                : 0;
+            // Local is ahead (has more objects) — protect from remote overwrite.
+            if (localPageCount > livePageCount) {
+              continue;
+            }
+            // Also guard if a sync or save timer is still in flight (user recently drew).
+            final isActivelyDrawingThisDoc =
+                (_canvasSyncTimer?.isActive == true || _localSaveTimer?.isActive == true);
+            if (isActivelyDrawingThisDoc) {
+              continue;
+            }
           }
 
           final idx = canvasDocs.indexWhere((d) => d.id == liveDoc.id);
@@ -1811,6 +2162,7 @@ class AppState extends ChangeNotifier {
 
     if (hasAnyChange) {
       computeAccountStorage(forceCloudSync: false);
+      notifyAppShell();
       notifyListeners();
     }
   }
@@ -1830,6 +2182,7 @@ class AppState extends ChangeNotifier {
     isPageViewMode = found.docType != CanvasDocType.canvas;
     viewMode = WorkspaceViewMode.canvasOnly; // Always canvasOnly when opening notebook
     isNotebookSidebarVisible = false; // Hide sidebar upon opening notebook
+    NotesLocalStorageService.saveActiveDocId(found.id, userId: userId);
     notifyListeners();
     _debounceSyncCanvas();
   }
@@ -1899,12 +2252,14 @@ class AppState extends ChangeNotifier {
     _noteTodos[newDoc.id] = [];
     _persistNoteTodos(newDoc.id);
     canvasDocs.add(newDoc);
+    _syncedCloudDocIds.add(newDoc.id);
     switchNotebook(newDoc.id);
     NotesLocalStorageService.saveDocLocally(newDoc, userId: userId);
-    if (currentWorkspace != null && userId != null) {
+    if (currentWorkspace != null && userId != null && userId != 'local_user' && !userId!.startsWith('guest_')) {
       firestoreService.saveCanvasDoc(userId!, currentWorkspace!.id, newDoc);
     }
     computeAccountStorage(forceCloudSync: true);
+    notifyAppShell();
   }
 
   /// Async version for dialogs — supports awaiting creation
@@ -2222,7 +2577,7 @@ class AppState extends ChangeNotifier {
     canvasDocs.add(newDoc);
     switchNotebook(newDoc.id);
     NotesLocalStorageService.saveDocLocally(newDoc, userId: userId);
-    if (currentWorkspace != null && userId != null) {
+    if (currentWorkspace != null && userId != null && userId != 'local_user' && !userId!.startsWith('guest_')) {
       firestoreService.saveCanvasDoc(userId!, currentWorkspace!.id, newDoc);
     }
     computeAccountStorage(forceCloudSync: true);
@@ -2263,19 +2618,60 @@ class AppState extends ChangeNotifier {
   }
 
 
-  void deleteNotebook(String notebookId) {
-    if (canvasDocs.length <= 1) return;
+  Future<void> deleteNotebook(String notebookId) async {
     final docId = notebookId;
+    _syncedCloudDocIds.remove(docId);
+
+    // 1. Instantly remove from local in-memory state
     canvasDocs.removeWhere((d) => d.id == notebookId);
-    if (currentWorkspace != null && userId != null) {
-      firestoreService.deleteCanvasDoc(userId!, currentWorkspace!.id, docId);
-    }
-    NotesLocalStorageService.deleteDocLocally(docId, userId: userId);
-    if (currentCanvasDoc?.id == notebookId) {
+
+    // 2. If no notebooks remain in this workspace, initialize a fresh clean starter notebook immediately
+    if (canvasDocs.isEmpty) {
+      final wsId = currentWorkspace?.id ?? 'default';
+      final newDoc = CanvasDocModel(
+        id: 'notebook_${DateTime.now().millisecondsSinceEpoch}',
+        name: 'Notebook 1',
+        workspaceId: wsId,
+        pages: [CanvasPage(id: 'page_1', pageNumber: 1, title: 'Page 1')],
+      );
+      canvasDocs.add(newDoc);
+      currentCanvasDoc = newDoc;
+      currentPageIndex = 0;
+      canvasPaperStyle = newDoc.activePage.paperStyle;
+      canvasObjects = [];
+      isPageViewMode = true;
+      NotesLocalStorageService.saveDocLocally(newDoc, userId: userId);
+      if (userId != null && userId != 'local_user' && !userId!.startsWith('guest_')) {
+        firestoreService.saveCanvasDoc(userId!, wsId, newDoc);
+      }
+    } else if (currentCanvasDoc?.id == notebookId) {
+      // Switched away from the deleted document
       switchNotebook(canvasDocs.first.id);
-    } else {
-      notifyListeners();
     }
+
+    // 3. Immediately notify UI listeners and AppShell for real-time reactivity
+    notifyAppShell();
+    notifyListeners();
+    computeAccountStorage(forceCloudSync: false);
+
+    // 4. Scrub and purge across all local storage scopes
+    await NotesLocalStorageService.deleteDocEverywhere(docId, userId: userId);
+
+    // 5. Delete from Firestore in current workspace AND 'default' workspace (if different)
+    if (userId != null && userId != 'local_user' && !userId!.startsWith('guest_')) {
+      final wsId = currentWorkspace?.id ?? 'default';
+      try {
+        await firestoreService.deleteCanvasDoc(userId!, wsId, docId);
+      } catch (e) {
+        debugPrint('[DELETE-NOTEBOOK] Error deleting from Firestore workspace $wsId: $e');
+      }
+      if (wsId != 'default') {
+        try {
+          await firestoreService.deleteCanvasDoc(userId!, 'default', docId);
+        } catch (_) {}
+      }
+    }
+
     computeAccountStorage(forceCloudSync: true);
   }
 
@@ -2285,8 +2681,10 @@ class AppState extends ChangeNotifier {
   void _syncCurrentPageObjects() {
     if (currentCanvasDoc != null && currentCanvasDoc!.pages.isNotEmpty) {
       final idx = currentPageIndex.clamp(0, currentCanvasDoc!.pages.length - 1);
-      currentCanvasDoc!.pages[idx].objects = List.from(canvasObjects);
-      currentCanvasDoc!.pages[idx].paperStyle = canvasPaperStyle;
+      final page = currentCanvasDoc!.pages[idx];
+      page.objects = canvasObjects;
+      page.paperStyle = canvasPaperStyle;
+      page.markDirty();
       currentCanvasDoc!.currentPageIndex = idx;
     }
   }
@@ -2421,6 +2819,7 @@ class AppState extends ChangeNotifier {
     canvasObjects = [...canvasObjects, obj];
     currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
+    _notifyCanvasObjects();
     notifyListeners();
     _debouncePersist();
   }
@@ -2430,6 +2829,7 @@ class AppState extends ChangeNotifier {
     canvasObjects = canvasObjects.where((o) => o.id != obj.id).toList();
     currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
+    _notifyCanvasObjects();
     notifyListeners();
     _debouncePersist();
   }
@@ -2439,6 +2839,7 @@ class AppState extends ChangeNotifier {
     canvasObjects = List.from(newObjects);
     currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
+    _notifyCanvasObjects();
     notifyListeners();
     if (!isLiveSession) {
       _debouncePersist();
@@ -2452,6 +2853,7 @@ class AppState extends ChangeNotifier {
       canvasObjects[index] = updatedObj;
       currentCanvasDoc?.updatedAt = DateTime.now();
       _syncCurrentPageObjects();
+      _notifyCanvasObjects();
       notifyListeners();
       _debouncePersist();
     }
@@ -2467,6 +2869,7 @@ class AppState extends ChangeNotifier {
       final tape = canvasObjects[index] as CanvasTapeItem;
       tape.isMasked = !tape.isMasked;
       _syncCurrentPageObjects();
+      _notifyCanvasObjects();
       notifyListeners();
       _debounceSyncCanvas();
     }
@@ -2485,6 +2888,7 @@ class AppState extends ChangeNotifier {
     selectedCanvasObjects.clear();
     currentCanvasDoc?.updatedAt = DateTime.now();
     _syncCurrentPageObjects();
+    _notifyCanvasObjects();
     notifyListeners();
     _debouncePersist();
   }
@@ -2506,6 +2910,7 @@ class AppState extends ChangeNotifier {
       canvasObjects = undoStack.removeLast();
       currentCanvasDoc?.updatedAt = DateTime.now();
       _syncCurrentPageObjects();
+      _notifyCanvasObjects();
       notifyListeners();
       _debounceSyncCanvas();
     }
@@ -2520,6 +2925,7 @@ class AppState extends ChangeNotifier {
       canvasObjects = redoStack.removeLast();
       currentCanvasDoc?.updatedAt = DateTime.now();
       _syncCurrentPageObjects();
+      _notifyCanvasObjects();
       notifyListeners();
       _debounceSyncCanvas();
     }
@@ -2566,30 +2972,132 @@ class AppState extends ChangeNotifier {
 
   void deselectAllCanvasObjects() => clearCanvasSelection();
 
-  void recolorSelectedCanvasObjects(Color newColor) {
-    for (final obj in selectedCanvasObjects) {
+  void deleteSelectedCanvasObjects() {
+    if (selectedCanvasObjects.isEmpty) return;
+    _pushUndo();
+    final selected = List<CanvasObjectItem>.from(selectedCanvasObjects);
+    canvasObjects = canvasObjects.where((o) => !selected.contains(o)).toList();
+    selectedCanvasObjects.clear();
+    currentCanvasDoc?.updatedAt = DateTime.now();
+    _syncCurrentPageObjects();
+    notifyListeners();
+    _debouncePersist();
+  }
+
+  void duplicateSelectedCanvasObjects() {
+    if (selectedCanvasObjects.isEmpty) return;
+    _pushUndo();
+    final List<CanvasObjectItem> duplicates = [];
+    final ts = DateTime.now().microsecondsSinceEpoch;
+    for (int i = 0; i < selectedCanvasObjects.length; i++) {
+      final obj = selectedCanvasObjects[i];
       if (obj is CanvasStrokeItem) {
-        final idx = canvasObjects.indexOf(obj);
-        if (idx != -1) {
-          canvasObjects[idx] = obj.copyWith(color: newColor);
+        duplicates.add(
+          obj.copyWith(
+            id: 'stroke-$ts-$i',
+            points: obj.points.map((p) => p.copyWith(x: p.x + 20, y: p.y + 20)).toList(),
+            isSelected: true,
+          ),
+        );
+      } else if (obj is CanvasShapeItem) {
+        duplicates.add(
+          obj.copyWith(
+            id: 'shape-$ts-$i',
+            bounds: obj.bounds.shift(const Offset(20, 20)),
+            startPoint: obj.startPoint != null ? obj.startPoint! + const Offset(20, 20) : null,
+            endPoint: obj.endPoint != null ? obj.endPoint! + const Offset(20, 20) : null,
+            isSelected: true,
+          ),
+        );
+      } else if (obj is CanvasTextItem) {
+        duplicates.add(
+          obj.copyWith(
+            id: 'text-$ts-$i',
+            position: obj.position + const Offset(20, 20),
+            isSelected: true,
+          ),
+        );
+      } else if (obj is CanvasNoteCardItem) {
+        duplicates.add(
+          obj.copyWith(
+            id: 'card-$ts-$i',
+            position: obj.position + const Offset(20, 20),
+            isSelected: true,
+          ),
+        );
+      } else if (obj is CanvasImageItem) {
+        duplicates.add(
+          obj.copyWith(
+            id: 'img-$ts-$i',
+            bounds: obj.bounds.shift(const Offset(20, 20)),
+            isSelected: true,
+          ),
+        );
+      } else if (obj is CanvasTapeItem) {
+        duplicates.add(
+          obj.copyWith(
+            id: 'tape-$ts-$i',
+            rect: obj.rect.shift(const Offset(20, 20)),
+            isSelected: true,
+          ),
+        );
+      }
+    }
+    for (var o in canvasObjects) {
+      o.isSelected = false;
+    }
+    selectedCanvasObjects.clear();
+    canvasObjects = [...canvasObjects, ...duplicates];
+    selectedCanvasObjects.addAll(duplicates);
+    currentCanvasDoc?.updatedAt = DateTime.now();
+    _syncCurrentPageObjects();
+    notifyListeners();
+    _debouncePersist();
+  }
+
+  void recolorSelectedCanvasObjects(Color newColor) {
+    if (selectedCanvasObjects.isEmpty) return;
+    _pushUndo();
+    for (int i = 0; i < canvasObjects.length; i++) {
+      final obj = canvasObjects[i];
+      if (obj.isSelected || selectedCanvasObjects.contains(obj)) {
+        if (obj is CanvasStrokeItem) {
+          canvasObjects[i] = obj.copyWith(color: newColor);
+        } else if (obj is CanvasShapeItem) {
+          canvasObjects[i] = obj.copyWith(strokeColor: newColor);
+        } else if (obj is CanvasTextItem) {
+          canvasObjects[i] = obj.copyWith(color: newColor);
         }
       }
     }
-    _debounceSyncCanvas();
+    currentCanvasDoc?.updatedAt = DateTime.now();
+    _syncCurrentPageObjects();
+    notifyListeners();
+    _debouncePersist();
   }
 
   void bringSelectedCanvasObjectsToFront() {
+    if (selectedCanvasObjects.isEmpty) return;
+    _pushUndo();
     final selected = List<CanvasObjectItem>.from(selectedCanvasObjects);
-    canvasObjects.removeWhere((o) => selected.contains(o));
-    canvasObjects.addAll(selected);
-    _debounceSyncCanvas();
+    final nonSelected = canvasObjects.where((o) => !selected.contains(o)).toList();
+    canvasObjects = [...nonSelected, ...selected];
+    currentCanvasDoc?.updatedAt = DateTime.now();
+    _syncCurrentPageObjects();
+    notifyListeners();
+    _debouncePersist();
   }
 
   void sendSelectedCanvasObjectsToBack() {
+    if (selectedCanvasObjects.isEmpty) return;
+    _pushUndo();
     final selected = List<CanvasObjectItem>.from(selectedCanvasObjects);
-    canvasObjects.removeWhere((o) => selected.contains(o));
-    canvasObjects.insertAll(0, selected);
-    _debounceSyncCanvas();
+    final nonSelected = canvasObjects.where((o) => !selected.contains(o)).toList();
+    canvasObjects = [...selected, ...nonSelected];
+    currentCanvasDoc?.updatedAt = DateTime.now();
+    _syncCurrentPageObjects();
+    notifyListeners();
+    _debouncePersist();
   }
 
   void renameCurrentCanvasDoc(String newName) {
@@ -2607,12 +3115,12 @@ class AppState extends ChangeNotifier {
   Timer? _canvasSyncTimer;
   Timer? _localSaveTimer;
 
-  /// Debounced persistence: local save after 600ms idle, cloud sync after 1200ms idle.
+  /// Debounced persistence: local save after 1200ms idle, cloud sync after 2500ms idle.
   /// Prevents I/O spam during rapid drawing while guaranteeing zero data loss.
   void _debouncePersist() {
-    // Debounced local save — fires after 600ms of no new strokes
+    // Debounced local save — fires after 1200ms of no new strokes
     _localSaveTimer?.cancel();
-    _localSaveTimer = Timer(const Duration(milliseconds: 600), () {
+    _localSaveTimer = Timer(const Duration(milliseconds: 1200), () {
       _syncCurrentPageObjects();
       if (currentCanvasDoc != null) {
         currentCanvasDoc!.updatedAt = DateTime.now();
@@ -2621,13 +3129,13 @@ class AppState extends ChangeNotifier {
       }
     });
 
-    // Debounced cloud sync — fires after 1200ms of no new strokes
+    // Debounced cloud sync — fires after 2500ms of no new strokes
     _canvasSyncTimer?.cancel();
     if (autosaveStatus != 'saving') {
       autosaveStatus = 'saving';
       // Don't notifyListeners here — avoid unnecessary rebuild during active drawing
     }
-    _canvasSyncTimer = Timer(const Duration(milliseconds: 1200), () async {
+    _canvasSyncTimer = Timer(const Duration(milliseconds: 2500), () async {
       // Ensure local save completed first
       _localSaveTimer?.cancel();
       _syncCurrentPageObjects();
@@ -2652,18 +3160,21 @@ class AppState extends ChangeNotifier {
     });
   }
 
-  /// Legacy alias for callers that need synchronous local+cloud sync (page switches, etc.)
+  /// Debounced sync for callers that need local+cloud sync (page switches, text commits, etc.).
+  /// All I/O is deferred into the Timer callback — nothing blocks the main thread synchronously.
   void _debounceSyncCanvas() {
     _syncCurrentPageObjects();
-    if (currentCanvasDoc != null) {
-      currentCanvasDoc!.updatedAt = DateTime.now();
-      NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
-      NotesLocalStorageService.saveActiveDocId(currentCanvasDoc!.id, userId: userId);
-    }
     _canvasSyncTimer?.cancel();
+    // Update status field only — use appShellNotifier so the canvas does NOT rebuild.
     autosaveStatus = 'saving';
-    notifyListeners();
+    notifyAppShell();
     _canvasSyncTimer = Timer(const Duration(milliseconds: 600), () async {
+      // All persistence I/O happens off the hot path, inside the timer.
+      if (currentCanvasDoc != null) {
+        currentCanvasDoc!.updatedAt = DateTime.now();
+        NotesLocalStorageService.saveDocLocally(currentCanvasDoc!, userId: userId);
+        NotesLocalStorageService.saveActiveDocId(currentCanvasDoc!.id, userId: userId);
+      }
       if (currentCanvasDoc != null && currentWorkspace != null && userId != null) {
         try {
           await firestoreService.saveCanvasDoc(
@@ -2805,14 +3316,53 @@ class AppState extends ChangeNotifier {
     return Offset(80.0 + col * 540.0, 100.0 + row * 340.0);
   }
 
-  void moveCanvasTextItem(String id, Offset delta) {
+  /// Moves any canvas object by [delta] (world coordinates).
+  /// When [isLiveDrag] is true, only [canvasObjectsNotifier] is notified to achieve
+  /// buttery-smooth 60/120fps repaints without triggering expensive widget tree rebuilds.
+  void moveCanvasObject(String id, Offset delta, {bool isLiveDrag = false}) {
     final index = canvasObjects.indexWhere((o) => o.id == id);
-    if (index != -1 && canvasObjects[index] is CanvasTextItem) {
-      final item = canvasObjects[index] as CanvasTextItem;
-      item.position = Offset(item.position.dx + delta.dx, item.position.dy + delta.dy);
-      notifyListeners();
-      _debounceSyncCanvas();
+    if (index != -1) {
+      final obj = canvasObjects[index];
+      if (obj is CanvasTextItem) {
+        obj.position += delta;
+      } else if (obj is CanvasNoteCardItem) {
+        obj.position += delta;
+      } else if (obj is CanvasShapeItem) {
+        obj.bounds = obj.bounds.shift(delta);
+        if (obj.startPoint != null) obj.startPoint = obj.startPoint! + delta;
+        if (obj.endPoint != null) obj.endPoint = obj.endPoint! + delta;
+      } else if (obj is CanvasImageItem) {
+        obj.bounds = obj.bounds.shift(delta);
+      } else if (obj is CanvasTapeItem) {
+        obj.rect = obj.rect.shift(delta);
+      }
+      _notifyCanvasObjects();
+      if (!isLiveDrag) {
+        _syncCurrentPageObjects();
+        notifyListeners();
+        _debouncePersist();
+      }
     }
+  }
+
+  void resizeCanvasImageItem(String id, Rect newBounds, {bool isLiveDrag = false}) {
+    final index = canvasObjects.indexWhere((o) => o.id == id);
+    if (index != -1) {
+      final obj = canvasObjects[index];
+      if (obj is CanvasImageItem) {
+        obj.bounds = newBounds;
+        _notifyCanvasObjects();
+        if (!isLiveDrag) {
+          _syncCurrentPageObjects();
+          notifyListeners();
+          _debouncePersist();
+        }
+      }
+    }
+  }
+
+  void moveCanvasTextItem(String id, Offset delta, {bool isLiveDrag = false}) {
+    moveCanvasObject(id, delta, isLiveDrag: isLiveDrag);
   }
 
   // Import entire chat thread from ChatGPT, Claude, Gemini, or any AI
@@ -3088,17 +3638,8 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  void moveCanvasCard(String cardId, Offset delta) {
-    final index = canvasObjects.indexWhere((o) => o.id == cardId);
-    if (index != -1 && canvasObjects[index] is CanvasNoteCardItem) {
-      final card = canvasObjects[index] as CanvasNoteCardItem;
-      card.position = Offset(
-        (card.position.dx + delta.dx).clamp(10.0, 3000.0),
-        (card.position.dy + delta.dy).clamp(10.0, 3000.0),
-      );
-      notifyListeners();
-      _debounceSyncCanvas();
-    }
+  void moveCanvasCard(String cardId, Offset delta, {bool isLiveDrag = false}) {
+    moveCanvasObject(cardId, delta, isLiveDrag: isLiveDrag);
   }
 
   void removeCanvasCard(String cardId) {
@@ -3339,8 +3880,53 @@ class AppState extends ChangeNotifier {
     isSearching = true;
     notifyListeners();
 
+    _syncCurrentPageObjects();
+    if (currentCanvasDoc != null && !canvasDocs.any((d) => d.id == currentCanvasDoc!.id)) {
+      canvasDocs.insert(0, currentCanvasDoc!);
+    }
+
     final List<SearchResultItemModel> localResults = [];
     final cleanQ = query.trim().toLowerCase();
+
+    // 0. Search active canvasObjects in memory
+    for (final obj in canvasObjects) {
+      if (obj is CanvasTextItem && obj.text.toLowerCase().contains(cleanQ)) {
+        final idx = obj.text.toLowerCase().indexOf(cleanQ);
+        final start = math.max(0, idx - 25);
+        final end = math.min(obj.text.length, idx + cleanQ.length + 45);
+        final snippet = 'Current Canvas: "...${obj.text.substring(start, end).replaceAll('\n', ' ')}..."';
+        final docId = currentCanvasDoc?.id ?? 'active';
+        final docName = currentCanvasDoc?.name ?? 'Current Notebook';
+        localResults.add(SearchResultItemModel(
+          entityType: 'note',
+          id: docId,
+          title: '$docName - Text',
+          snippet: snippet,
+          workspaceId: currentWorkspace?.id ?? 'default',
+          workspaceName: currentWorkspace?.name ?? 'Workspace',
+          createdAt: DateTime.now(),
+        ));
+      } else if (obj is CanvasNoteCardItem) {
+        if (obj.title.toLowerCase().contains(cleanQ) || obj.content.toLowerCase().contains(cleanQ)) {
+          final text = '${obj.title}: ${obj.content}';
+          final idx = text.toLowerCase().indexOf(cleanQ);
+          final start = math.max(0, idx - 20);
+          final end = math.min(text.length, idx + cleanQ.length + 50);
+          final snippet = 'Note Card: "...${text.substring(start, end).replaceAll('\n', ' ')}..."';
+          final docId = currentCanvasDoc?.id ?? 'active';
+          final docName = currentCanvasDoc?.name ?? 'Current Notebook';
+          localResults.add(SearchResultItemModel(
+            entityType: 'note',
+            id: docId,
+            title: '$docName - Note Card',
+            snippet: snippet,
+            workspaceId: currentWorkspace?.id ?? 'default',
+            workspaceName: currentWorkspace?.name ?? 'Workspace',
+            createdAt: DateTime.now(),
+          ));
+        }
+      }
+    }
 
     // 1. Search Canvas & Notebooks
     for (final doc in canvasDocs) {

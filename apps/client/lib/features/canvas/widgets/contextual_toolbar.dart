@@ -43,9 +43,12 @@ class ContextualToolbar extends StatelessWidget {
       const Color(0xFF7C3AED),
     ];
 
+    final screenWidth = MediaQuery.of(context).size.width;
+
     return Material(
       color: Colors.transparent,
       child: Container(
+        constraints: BoxConstraints(maxWidth: (screenWidth - 20.0).clamp(120.0, double.infinity)),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
           color: bg,
@@ -59,92 +62,96 @@ class ContextualToolbar extends StatelessWidget {
             ),
           ],
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Selected item count badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppColors.primary.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Text(
-                '${selectedObjects.length} selected',
-                style: GoogleFonts.inter(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.primary,
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Selected item count badge
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-              ),
-            ),
-
-            const SizedBox(width: 6),
-            _divider(borderColor),
-            const SizedBox(width: 6),
-
-            // Quick recolor swatches
-            for (final color in quickColors)
-              GestureDetector(
-                onTap: () => onRecolor(color),
-                child: Container(
-                  width: 18,
-                  height: 18,
-                  margin: const EdgeInsets.symmetric(horizontal: 2.5),
-                  decoration: BoxDecoration(
-                    color: color,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: isDark ? Colors.white24 : Colors.black12),
+                child: Text(
+                  '${selectedObjects.length} selected',
+                  style: GoogleFonts.inter(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.primary,
                   ),
                 ),
               ),
 
-            const SizedBox(width: 6),
-            _divider(borderColor),
-            const SizedBox(width: 4),
+              const SizedBox(width: 6),
+              _divider(borderColor),
+              const SizedBox(width: 6),
 
-            // Duplicate button
-            _actionBtn(
-              icon: Icons.copy_rounded,
-              tooltip: 'Duplicate',
-              onPressed: onDuplicate,
-              color: textSecondary,
-            ),
+              // Quick recolor swatches
+              for (final color in quickColors)
+                GestureDetector(
+                  onTap: () => onRecolor(color),
+                  child: Container(
+                    width: 18,
+                    height: 18,
+                    margin: const EdgeInsets.symmetric(horizontal: 2.5),
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: isDark ? Colors.white24 : Colors.black12),
+                    ),
+                  ),
+                ),
 
-            // Bring forward
-            _actionBtn(
-              icon: Icons.flip_to_front_rounded,
-              tooltip: 'Bring to Front',
-              onPressed: onBringToFront,
-              color: textSecondary,
-            ),
+              const SizedBox(width: 6),
+              _divider(borderColor),
+              const SizedBox(width: 4),
 
-            // Send backward
-            _actionBtn(
-              icon: Icons.flip_to_back_rounded,
-              tooltip: 'Send to Back',
-              onPressed: onSendToBack,
-              color: textSecondary,
-            ),
+              // Duplicate button
+              _actionBtn(
+                icon: Icons.copy_rounded,
+                tooltip: 'Duplicate',
+                onPressed: onDuplicate,
+                color: textSecondary,
+              ),
 
-            _divider(borderColor),
+              // Bring forward
+              _actionBtn(
+                icon: Icons.flip_to_front_rounded,
+                tooltip: 'Bring to Front',
+                onPressed: onBringToFront,
+                color: textSecondary,
+              ),
 
-            // Delete button
-            _actionBtn(
-              icon: Icons.delete_outline_rounded,
-              tooltip: 'Delete',
-              onPressed: onDelete,
-              color: Colors.redAccent,
-            ),
+              // Send backward
+              _actionBtn(
+                icon: Icons.flip_to_back_rounded,
+                tooltip: 'Send to Back',
+                onPressed: onSendToBack,
+                color: textSecondary,
+              ),
 
-            // Close / Deselect
-            _actionBtn(
-              icon: Icons.close_rounded,
-              tooltip: 'Deselect',
-              onPressed: onDeselect,
-              color: textSecondary,
-            ),
-          ],
+              _divider(borderColor),
+
+              // Delete button
+              _actionBtn(
+                icon: Icons.delete_outline_rounded,
+                tooltip: 'Delete',
+                onPressed: onDelete,
+                color: Colors.redAccent,
+              ),
+
+              // Close / Deselect
+              _actionBtn(
+                icon: Icons.close_rounded,
+                tooltip: 'Deselect',
+                onPressed: onDeselect,
+                color: textSecondary,
+              ),
+            ],
+          ),
         ),
       ),
     );

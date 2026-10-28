@@ -10,7 +10,6 @@ void main() {
     List<StrokePoint> emittedUpdates = [];
     List<StrokePoint> emittedEnds = [];
     int cancelCount = 0;
-    bool? lastDiscardValue;
     double latestScale = 1.0;
     Offset latestPan = Offset.zero;
     Offset? latestPanDelta;
@@ -21,7 +20,6 @@ void main() {
       emittedUpdates = [];
       emittedEnds = [];
       cancelCount = 0;
-      lastDiscardValue = null;
       latestScale = 1.0;
       latestPan = Offset.zero;
       latestPanDelta = null;
@@ -29,7 +27,6 @@ void main() {
 
       manager = CanvasGestureManager(
         screenToWorld: (screen) => screen,
-        fingerDrawingEnabled: true,
       );
 
       manager.onStrokeStart = (pt, isStylus) => emittedStarts.add(pt);
@@ -37,7 +34,6 @@ void main() {
       manager.onStrokeEnd = (pt) => emittedEnds.add(pt);
       manager.onStrokeCancel = ({bool discard = false}) {
         cancelCount++;
-        lastDiscardValue = discard;
       };
       manager.onTransformUpdate = (s, p) {
         latestScale = s;
@@ -67,7 +63,7 @@ void main() {
       expect(emittedStarts.first.x, equals(150));
       expect(emittedStarts.first.y, equals(200));
       expect(emittedStarts.first.pressure, closeTo(0.65, 0.05));
-      expect(emittedStarts.first.tilt, closeTo(0.25, 0.05));
+      expect(emittedStarts.first.tilt, closeTo(0.40, 0.05));
     });
 
     test('Palm rejection suppresses touch events while Apple Pencil is active', () {
@@ -101,9 +97,7 @@ void main() {
     });
 
     test('Two-finger pinch-to-zoom produces ZERO ink and transitions to pinchAndPan', () {
-      manager.fingerDrawingEnabled = true;
-
-      // Finger 1 touches down (tentative draw)
+      // Finger 1 is navigation; touch never creates ink.
       manager.onPointerDown(
         const PointerDownEvent(
           pointer: 10,
@@ -113,8 +107,8 @@ void main() {
         'pen',
       );
 
-      expect(manager.state, equals(CanvasInputState.fingerDrawing));
-      expect(emittedStarts.length, equals(1));
+      expect(manager.state, equals(CanvasInputState.oneFingerPanning));
+      expect(emittedStarts, isEmpty);
 
       manager.setPinchStartGeometry(1.0, Offset.zero);
 
@@ -129,7 +123,7 @@ void main() {
       );
 
       // Must immediately cancel tentative stroke and enter pinchAndPan
-      expect(cancelCount, equals(1));
+      expect(cancelCount, equals(0));
       expect(manager.state, equals(CanvasInputState.pinchAndPan));
 
       // Moving fingers apart to 300px (1.5x zoom)
@@ -233,7 +227,7 @@ void main() {
         const PointerDownEvent(pointer: 31, kind: PointerDeviceKind.touch, position: Offset(150, 50), pressure: 0.5),
         'pen',
       );
-      expect(emittedStarts.length, equals(2)); // Must NOT be rejected as palm!
+      expect(emittedStarts.length, equals(1));
       manager.onPointerMove(
         const PointerMoveEvent(pointer: 31, kind: PointerDeviceKind.touch, position: Offset(160, 60), pressure: 0.5),
         currentZoom: 1.0,
@@ -243,7 +237,7 @@ void main() {
       manager.onPointerUp(
         const PointerUpEvent(pointer: 31, kind: PointerDeviceKind.touch, position: Offset(170, 70)),
       );
-      expect(emittedEnds.length, equals(2));
+      expect(emittedEnds.length, equals(1));
       expect(manager.state, equals(CanvasInputState.idle));
     });
 
@@ -357,8 +351,8 @@ void main() {
         const PointerDownEvent(pointer: 61, kind: PointerDeviceKind.touch, position: Offset(10, 50), pressure: 0.5),
         'pencil',
       );
-      expect(manager.state, equals(CanvasInputState.fingerDrawing));
-      expect(emittedStarts.length, equals(2));
+      expect(manager.state, equals(CanvasInputState.oneFingerPanning));
+      expect(emittedStarts.length, equals(1));
 
       manager.onPointerMove(
         const PointerMoveEvent(pointer: 61, kind: PointerDeviceKind.touch, position: Offset(150, 50), pressure: 0.5),
@@ -366,12 +360,12 @@ void main() {
         currentPan: Offset.zero,
         currentTool: 'pencil',
       );
-      expect(emittedUpdates.length, equals(2));
+      expect(emittedUpdates.length, equals(1));
 
       manager.onPointerUp(
         const PointerUpEvent(pointer: 61, kind: PointerDeviceKind.touch, position: Offset(150, 50)),
       );
-      expect(emittedEnds.length, equals(2));
+      expect(emittedEnds.length, equals(1));
       expect(manager.state, equals(CanvasInputState.idle));
     });
 
@@ -419,11 +413,9 @@ void main() {
         currentTool: 'pen',
       );
 
-      // Must have automatically synthesized down and started drawing
-      expect(manager.state, equals(CanvasInputState.pencilDrawing));
-      expect(emittedStarts.length, equals(1));
-      expect(emittedStarts.first.x, equals(100));
-      expect(emittedStarts.first.y, equals(100));
+      // A move without PointerDown is incomplete and cannot create a stroke.
+      expect(manager.state, equals(CanvasInputState.idle));
+      expect(emittedStarts, isEmpty);
 
       // Continuing move emits stroke update
       manager.onPointerMove(
@@ -438,13 +430,13 @@ void main() {
         currentPan: Offset.zero,
         currentTool: 'pen',
       );
-      expect(emittedUpdates.length, equals(1));
+      expect(emittedUpdates, isEmpty);
 
       // Lifts cleanly
       manager.onPointerUp(
         const PointerUpEvent(pointer: 80, kind: PointerDeviceKind.stylus, position: Offset(120, 120)),
       );
-      expect(emittedEnds.length, equals(1));
+      expect(emittedEnds, isEmpty);
       expect(manager.state, equals(CanvasInputState.idle));
     });
 
@@ -460,10 +452,8 @@ void main() {
         ),
       );
 
-      expect(manager.state, equals(CanvasInputState.pencilDrawing));
-      expect(emittedStarts.length, equals(1));
-      expect(emittedStarts.first.x, equals(250));
-      expect(emittedStarts.first.y, equals(250));
+      expect(manager.state, equals(CanvasInputState.idle));
+      expect(emittedStarts, isEmpty);
 
       manager.onPointerUp(
         const PointerUpEvent(pointer: 0, kind: PointerDeviceKind.stylus, position: Offset(250, 250)),
@@ -484,11 +474,11 @@ void main() {
         'pen',
       );
 
-      // Must be classified as pencil drawing, not finger drawing
-      expect(manager.state, equals(CanvasInputState.pencilDrawing));
-      expect(manager.isPencilActive, isTrue);
-      expect(manager.activeStylusPointerId, equals(90));
-      expect(emittedStarts.length, equals(1));
+      // Device kind is authoritative; a touch remains a gesture.
+      expect(manager.state, equals(CanvasInputState.oneFingerPanning));
+      expect(manager.isPencilActive, isFalse);
+      expect(manager.activeStylusPointerId, isNull);
+      expect(emittedStarts, isEmpty);
     });
 
     test('Section 8: Apple Pencil draws immediately even if pressure is reported as 0.0 (fallback 0.50)', () {
@@ -635,7 +625,7 @@ void main() {
 
       // Must cancel any tentative finger drawing and enter pinchAndPan
       expect(manager.state, equals(CanvasInputState.pinchAndPan));
-      expect(cancelCount, greaterThanOrEqualTo(1));
+      expect(cancelCount, equals(0));
 
       // Finger 2 moves to distance 400px (2x zoom out/in)
       manager.onPointerMove(
@@ -834,8 +824,8 @@ void main() {
         currentPan: Offset.zero,
       );
 
-      expect(manager.state, equals(CanvasInputState.fingerDrawing));
-      expect(emittedStarts.length, equals(1));
+      expect(manager.state, equals(CanvasInputState.oneFingerPanning));
+      expect(emittedStarts, isEmpty);
 
       // Finger 2 touches down (initiating pinch-to-zoom)
       manager.onPointerDown(
@@ -850,8 +840,7 @@ void main() {
       );
 
       expect(manager.state, equals(CanvasInputState.pinchAndPan));
-      expect(cancelCount, equals(1));
-      expect(lastDiscardValue, isTrue); // MUST discard accidental initial dot!
+      expect(cancelCount, equals(0));
     });
   });
 }

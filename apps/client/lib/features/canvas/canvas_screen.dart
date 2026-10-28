@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -14,8 +15,8 @@ import 'package:ai_workspace_client/features/canvas/widgets/floating_secondary_t
 import 'package:ai_workspace_client/features/canvas/widgets/floating_pen_options_dialog.dart';
 import 'package:ai_workspace_client/features/canvas/widgets/floating_lasso_options_dialog.dart';
 import 'package:ai_workspace_client/features/canvas/tools/eraser_tool.dart';
-import 'package:ai_workspace_client/features/canvas/tools/highlighter_tool.dart';
 import 'package:ai_workspace_client/features/canvas/engine/canvas_gesture_manager.dart';
+import 'package:ai_workspace_client/features/canvas/engine/canvas_performance_profiler.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -28,11 +29,16 @@ import 'package:ai_workspace_client/features/canvas/widgets/canvas_toolbar.dart'
 import 'package:ai_workspace_client/features/canvas/widgets/goodnotes_pdf_study_viewer.dart';
 
 // ── GoodNotes Standard A4 Page Dimensions (World Space) ──────────────────────
-const double _kPageWidth  = 860.0;
+const double _kPageWidth = 860.0;
 const double _kPageHeight = 1200.0;
-const double _kPageLeft   = -430.0;
-const double _kPageTop    = -50.0;
-const Rect _kPageRect     = Rect.fromLTWH(_kPageLeft, _kPageTop, _kPageWidth, _kPageHeight);
+const double _kPageLeft = -430.0;
+const double _kPageTop = -50.0;
+const Rect _kPageRect = Rect.fromLTWH(
+  _kPageLeft,
+  _kPageTop,
+  _kPageWidth,
+  _kPageHeight,
+);
 
 class CanvasScreen extends StatefulWidget {
   final AppState state;
@@ -43,11 +49,14 @@ class CanvasScreen extends StatefulWidget {
   State<CanvasScreen> createState() => _CanvasScreenState();
 }
 
-class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderStateMixin {
+class _CanvasScreenState extends State<CanvasScreen>
+    with TickerProviderStateMixin {
   List<StrokePoint> _currentStrokePoints = [];
   Offset? _dragStart;
   Offset? _dragCurrent;
   String? _draggedTextItemId;
+  String? _draggedObjectId;
+  Offset? _lastDragWorldPos;
 
   // Freeform lasso points
   final List<Offset> _lassoPoints = [];
@@ -59,7 +68,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   bool _isTransitioning = false;
   int? _transitionFromPageIndex;
   int? _transitionToPageIndex;
-  double _slideDirection = -1.0; // -1.0: next page (slide left), 1.0: prev page (slide right)
+  double _slideDirection =
+      -1.0; // -1.0: next page (slide left), 1.0: prev page (slide right)
 
   // Infinite Viewport Transform State
   Offset _panOffset = Offset.zero;
@@ -94,6 +104,23 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   static final Map<String, ui.Image> _decodedImagesCache = {};
   static final Set<String> _loadingImages = {};
 
+  // Image selection and resize state
+  String? _selectedImageId;
+  bool _isResizingImage = false;
+  String? _resizingImageCorner; // 'tl', 'tr', 'bl', 'br'
+  Rect? _resizingImageInitialBounds;
+  double _resizingImageInitialAspect = 1.0;
+
+  CanvasImageItem? _getSelectedImageItem() {
+    if (_selectedImageId == null) return null;
+    for (final o in widget.state.canvasObjects) {
+      if (o.id == _selectedImageId && o is CanvasImageItem) {
+        return o;
+      }
+    }
+    return null;
+  }
+
   CanvasTextItem? _getSelectedTextItem() {
     if (_selectedTextItemId == null) return null;
     for (final o in widget.state.canvasObjects) {
@@ -103,6 +130,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     }
     return null;
   }
+
   bool _pageViewCentered = false;
   Size? _canvasSize; // actual canvas drawing area, set by LayoutBuilder
   int _lastKnownPageIndex = 0;
@@ -123,12 +151,25 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   bool _showPenOptionsDialog = false;
   bool _showLassoOptionsDialog = false;
   bool _isDrawing = false;
+  // Ink configuration is captured on PointerDown. Toolbar changes affect the
+  // next stroke only, never an already-owned Pencil pointer.
+  CanvasTool _activeStrokeTool = CanvasTool.pen;
+  Color _activeStrokeColor = const Color(0xFFE11D48);
+  double _activeStrokeWidth = 3.0;
+  double _activeStrokeOpacity = 1.0;
+  PenType _activeStrokePenType = PenType.ballpoint;
+  PressureSensitivity _activeStrokeSensitivity = PressureSensitivity.medium;
+  double _activeStrokeTipSharpness = 0.75;
+  double _activeStrokeTipFlatness = 0.66;
   bool _isErasingActive = false;
   bool _hasErasedInCurrentGesture = false;
   Offset? _lastEraseWorldPos;
   Offset? _lastHoverScreenPos;
-  final ValueNotifier<Offset?> _eraserCursorPosNotifier = ValueNotifier<Offset?>(null);
-  final ValueNotifier<bool> _isErasingActiveNotifier = ValueNotifier<bool>(false);
+  final ValueNotifier<Offset?> _eraserCursorPosNotifier =
+      ValueNotifier<Offset?>(null);
+  final ValueNotifier<bool> _isErasingActiveNotifier = ValueNotifier<bool>(
+    false,
+  );
 
   double get _effectiveEraserWorldRadius {
     final presets = _drawingState.eraserWidthPresets;
@@ -139,10 +180,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     return (preset / _zoomScale).clamp(2.0, 200.0);
   }
 
-  double get _effectiveEraserScreenRadius => _effectiveEraserWorldRadius * _zoomScale;
-  DateTime? _pointerDownTime;
+  double get _effectiveEraserScreenRadius =>
+      _effectiveEraserWorldRadius * _zoomScale;
   Offset? _lastPointerMovePos;
-  DateTime? _lastPointerMoveTime;
 
   // P1 & P2 Features: Diagnostic HUD, Page Drawer, Lasso Drag
   bool _showDiagnosticHud = false;
@@ -152,7 +192,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   Offset? _lastSelectionDragPos;
 
   late final CanvasGestureManager _gestureManager;
-  final ValueNotifier<Offset?> _stylusHoverPosNotifier = ValueNotifier<Offset?>(null);
+  final ValueNotifier<Offset?> _stylusHoverPosNotifier = ValueNotifier<Offset?>(
+    null,
+  );
 
   // GoodNotes PDF Study Reader & Document Overlay
   bool _isPdfStudyReaderOpen = false;
@@ -163,11 +205,6 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   bool _isSwipeGestureActive = false;
   Offset? _horizontalSwipeStartPos;
   int? _horizontalSwipePointerId;
-  DateTime? _lastPageSwipeTriggerTime;
-  double _cumulativePanDeltaX = 0.0;
-  DateTime? _lastPanDeltaTimestamp;
-  double _cumulativeTrackpadScrollDx = 0.0;
-  DateTime? _lastTrackpadScrollTimestamp;
   String? _pageSwipeFeedbackText;
   Timer? _pageSwipeFeedbackTimer;
   late final AnimationController _springBackCtrl;
@@ -177,6 +214,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   // ── GoodNotes Draw-and-Hold Shape Recognition & Realtime Manipulation ─────
   Timer? _drawAndHoldTimer;
+  bool _drawAndHoldRecognitionAttempted = false;
   bool _isHoldingSnappedShape = false;
   CanvasShapeItem? _holdingSnappedShape;
   Offset? _holdingShapeAnchor;
@@ -186,28 +224,24 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   void _startDrawAndHoldTimer() {
     _cancelDrawAndHoldTimer();
     final tool = widget.state.currentTool;
-    final isShapeTool = tool == CanvasTool.rectangle ||
+    final isShapeTool =
+        tool == CanvasTool.rectangle ||
         tool == CanvasTool.circle ||
+        tool == CanvasTool.triangle ||
         tool == CanvasTool.line ||
         tool == CanvasTool.arrow;
     if (!_drawingState.drawAndHold && !isShapeTool) return;
-    _drawAndHoldTimer = Timer(const Duration(milliseconds: 450), _onDrawAndHoldFired);
-  }
-
-  void _resetDrawAndHoldTimer() {
-    _cancelDrawAndHoldTimer();
-    final tool = widget.state.currentTool;
-    final isShapeTool = tool == CanvasTool.rectangle ||
-        tool == CanvasTool.circle ||
-        tool == CanvasTool.line ||
-        tool == CanvasTool.arrow;
-    if (!_drawingState.drawAndHold && !isShapeTool) return;
-    _drawAndHoldTimer = Timer(const Duration(milliseconds: 450), _onDrawAndHoldFired);
+    _drawAndHoldRecognitionAttempted = false;
+    _drawAndHoldTimer = Timer(const Duration(milliseconds: 580), () {
+      if (!_isDrawing) return;
+      _onDrawAndHoldFired();
+    });
   }
 
   void _cancelDrawAndHoldTimer() {
     _drawAndHoldTimer?.cancel();
     _drawAndHoldTimer = null;
+    _drawAndHoldRecognitionAttempted = false;
   }
 
   Offset _snapLineAngle(Offset start, Offset current) {
@@ -219,13 +253,24 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     final degrees = angle * 180.0 / math.pi;
 
     // GoodNotes ruler snap angles: horizontal (0, 180), vertical (90, -90), and 45-degree diagonals
-    const snapAngles = [0.0, 45.0, 90.0, 135.0, 180.0, -45.0, -90.0, -135.0, -180.0];
+    const snapAngles = [
+      0.0,
+      45.0,
+      90.0,
+      135.0,
+      180.0,
+      -45.0,
+      -90.0,
+      -135.0,
+      -180.0,
+    ];
     const snapThreshold = 4.5; // degrees
 
     for (final target in snapAngles) {
       final diff = (degrees - target).abs();
       final altDiff = (degrees.abs() - 180.0).abs();
-      if (diff < snapThreshold || (altDiff < snapThreshold && target.abs() == 180.0)) {
+      if (diff < snapThreshold ||
+          (altDiff < snapThreshold && target.abs() == 180.0)) {
         final rad = target * math.pi / 180.0;
         return start + Offset(dist * math.cos(rad), dist * math.sin(rad));
       }
@@ -234,13 +279,38 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   }
 
   void _onDrawAndHoldFired() {
+    if (_drawAndHoldRecognitionAttempted) return;
+    _cancelDrawAndHoldTimer();
+    _drawAndHoldRecognitionAttempted = true;
     if (!_isDrawing || _currentStrokePoints.length < 5) return;
     if (!_drawingState.drawAndHold &&
         widget.state.currentTool != CanvasTool.rectangle &&
         widget.state.currentTool != CanvasTool.circle &&
+        widget.state.currentTool != CanvasTool.triangle &&
         widget.state.currentTool != CanvasTool.line &&
         widget.state.currentTool != CanvasTool.arrow) {
       return;
+    }
+
+    // Verify the pen was actually held stationary when the timer fired.
+    // If user was actively handwriting or moving, the recent points will have
+    // significant dispersion or be far from the stationary anchor.
+    if (_currentStrokePoints.length >= 4) {
+      final lastPos = _currentStrokePoints.last.toOffset();
+      if (_holdStationaryAnchor != null &&
+          (lastPos - _holdStationaryAnchor!).distance > 12.0) {
+        return; // Pen moved away from hold anchor; user is still drawing
+      }
+      final recentPoints = _currentStrokePoints.length > 8
+          ? _currentStrokePoints.sublist(_currentStrokePoints.length - 8)
+          : _currentStrokePoints;
+      final maxRecentDisp = recentPoints.fold<double>(
+        0.0,
+        (maxD, p) => math.max(maxD, (p.toOffset() - lastPos).distance),
+      );
+      if (maxRecentDisp > 12.0) {
+        return; // Pen was actively moving when timer expired
+      }
     }
 
     final isHighlighter = widget.state.currentTool == CanvasTool.highlighter;
@@ -262,39 +332,56 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             : recognized.bounds.center;
 
         if (recognized.shapeType == 'line' || recognized.shapeType == 'arrow') {
-          _holdingShapeAnchor = recognized.startPoint ?? recognized.bounds.topLeft;
+          _holdingShapeAnchor =
+              recognized.startPoint ?? recognized.bounds.topLeft;
         } else {
           _holdingShapeAnchor = recognized.bounds.center;
         }
         _drawingState.liveShapeNotifier.value = recognized;
         _drawingState.liveStrokeNotifier.clear();
-        try { HapticFeedback.selectionClick(); } catch (_) {}
+        try {
+          HapticFeedback.selectionClick();
+        } catch (_) {}
         return;
       }
     } else {
       // Highlighter straight line snap on hold
-      if (processedPoints.length >= 2) {
+      if (processedPoints.length >= 4) {
         final start = processedPoints.first.toOffset();
         final end = processedPoints.last.toOffset();
-        if ((end - start).distance > 15.0) {
-          final lineShape = CanvasShapeItem(
-            id: 'highlighter-line-${DateTime.now().microsecondsSinceEpoch}',
-            shapeType: 'line',
-            bounds: Rect.fromPoints(start, end),
-            strokeColor: widget.state.strokeColor.withValues(alpha: (widget.state.strokeOpacity * 0.45).clamp(0.1, 0.45)),
-            strokeWidth: widget.state.strokeWidth * 2.5,
-            startPoint: start,
-            endPoint: end,
-          );
-          _isHoldingSnappedShape = true;
-          _holdingSnappedShape = lineShape;
-          _snappedInitialBounds = lineShape.bounds;
-          _holdingShapeAnchor = start;
-          _holdStationaryAnchor = end;
-          _drawingState.liveShapeNotifier.value = lineShape;
-          _drawingState.liveStrokeNotifier.clear();
-          try { HapticFeedback.selectionClick(); } catch (_) {}
-          return;
+        final totalDist = (end - start).distance;
+        if (totalDist >= 50.0) {
+          double pathLen = 0.0;
+          for (int i = 0; i < processedPoints.length - 1; i++) {
+            pathLen +=
+                (processedPoints[i + 1].toOffset() - processedPoints[i].toOffset())
+                    .distance;
+          }
+          final isStraight = pathLen > 0 && (totalDist / pathLen) > 0.88;
+          if (isStraight) {
+            final lineShape = CanvasShapeItem(
+              id: 'highlighter-line-${DateTime.now().microsecondsSinceEpoch}',
+              shapeType: 'line',
+              bounds: Rect.fromPoints(start, end),
+              strokeColor: widget.state.strokeColor.withValues(
+                alpha: (widget.state.strokeOpacity * 0.45).clamp(0.1, 0.45),
+              ),
+              strokeWidth: widget.state.strokeWidth * 2.5,
+              startPoint: start,
+              endPoint: end,
+            );
+            _isHoldingSnappedShape = true;
+            _holdingSnappedShape = lineShape;
+            _snappedInitialBounds = lineShape.bounds;
+            _holdingShapeAnchor = start;
+            _holdStationaryAnchor = end;
+            _drawingState.liveShapeNotifier.value = lineShape;
+            _drawingState.liveStrokeNotifier.clear();
+            try {
+              HapticFeedback.selectionClick();
+            } catch (_) {}
+            return;
+          }
         }
       }
     }
@@ -346,7 +433,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       vsync: this,
       duration: const Duration(milliseconds: 240),
     );
-    _springBackAnim = Tween<double>(begin: 0.0, end: 0.0).animate(_springBackCtrl);
+    _springBackAnim = Tween<double>(
+      begin: 0.0,
+      end: 0.0,
+    ).animate(_springBackCtrl);
     _springBackCtrl.addListener(() {
       setState(() {
         _sheetDragOffset = _springBackAnim.value;
@@ -391,12 +481,14 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       if (widget.state.currentPenType != _drawingState.currentPenType) {
         widget.state.setPenType(_drawingState.currentPenType);
       }
-      if (widget.state.pressureSensitivity != _drawingState.pressureSensitivity) {
+      if (widget.state.pressureSensitivity !=
+          _drawingState.pressureSensitivity) {
         widget.state.setPressureSensitivity(_drawingState.pressureSensitivity);
       }
       _gestureManager.fingerDrawingEnabled = _drawingState.fingerDrawingEnabled;
       _gestureManager.setStabilization(_drawingState.strokeStabilization);
-      if (_drawingState.currentTool != CanvasTool.eraser && _eraserCursorPosNotifier.value != null) {
+      if (_drawingState.currentTool != CanvasTool.eraser &&
+          _eraserCursorPosNotifier.value != null) {
         _eraserCursorPosNotifier.value = null;
         _isErasingActiveNotifier.value = false;
       }
@@ -415,6 +507,15 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   void _onAppStateChanged() {
     if (!mounted) return;
     if (_isTransitioning) return;
+
+    // ── Performance Guard ──────────────────────────────────────────────────
+    // Skip a full setState during active drawing. The live stroke layer is
+    // driven by its own ValueNotifier (_drawingState.liveStrokeNotifier) and
+    // never needs a widget rebuild while the pen is down. Without this guard,
+    // every stroke commit (notifyListeners) rebuilds the entire CanvasScreen.
+    if (_isDrawing) return;
+    // ──────────────────────────────────────────────────────────────────────
+
     final docChanged = widget.state.currentCanvasDoc?.id != _lastKnownDocId;
     final modeChanged = widget.state.isPageViewMode != _lastKnownPageViewMode;
     final pageChanged = widget.state.currentPageIndex != _lastKnownPageIndex;
@@ -425,10 +526,34 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       _lastKnownPageIndex = widget.state.currentPageIndex;
       if (widget.state.isPageViewMode) {
         _pageViewCentered = false;
-        WidgetsBinding.instance.addPostFrameCallback((_) => _centerPageInView());
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _centerPageInView(),
+        );
       }
-      setState(() {});
     }
+
+    // Bidirectional sync from AppState to _drawingState
+    if (_drawingState.currentTool != widget.state.currentTool) {
+      _drawingState.setTool(widget.state.currentTool);
+    }
+    if (_drawingState.strokeColor != widget.state.strokeColor) {
+      _drawingState.setColor(widget.state.strokeColor);
+    }
+    if (_drawingState.strokeWidth != widget.state.strokeWidth) {
+      _drawingState.setStrokeWidth(widget.state.strokeWidth);
+    }
+    if (_drawingState.strokeOpacity != widget.state.strokeOpacity) {
+      _drawingState.setStrokeOpacity(widget.state.strokeOpacity);
+    }
+    if (_drawingState.currentPenType != widget.state.currentPenType) {
+      _drawingState.setPenType(widget.state.currentPenType);
+    }
+    if (_drawingState.pressureSensitivity !=
+        widget.state.pressureSensitivity) {
+      _drawingState.setPressureSensitivity(widget.state.pressureSensitivity);
+    }
+
+    setState(() {});
   }
 
   void _initGestureManager() {
@@ -436,6 +561,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       screenToWorld: _screenToWorld,
       fingerDrawingEnabled: _drawingState.fingerDrawingEnabled,
     );
+    _gestureManager.enableTelemetry = _showDiagnosticHud;
+    CanvasPerformanceProfiler.instance.isEnabled = _showDiagnosticHud;
     _gestureManager.setStabilization(_drawingState.strokeStabilization);
 
     _gestureManager.onStrokeStart = (point, isStylus) {
@@ -445,9 +572,15 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         point = point.copyWith(x: clampedX, y: clampedY);
       }
       _isDrawing = true;
-      _pointerDownTime = DateTime.now();
+      _activeStrokeTool = widget.state.currentTool;
+      _activeStrokeColor = widget.state.strokeColor;
+      _activeStrokeWidth = widget.state.strokeWidth;
+      _activeStrokeOpacity = widget.state.strokeOpacity;
+      _activeStrokePenType = _drawingState.currentPenType;
+      _activeStrokeSensitivity = _drawingState.pressureSensitivity;
+      _activeStrokeTipSharpness = _drawingState.tipSharpness;
+      _activeStrokeTipFlatness = _drawingState.tipFlatness;
       _lastPointerMovePos = Offset(point.x, point.y);
-      _lastPointerMoveTime = DateTime.now();
       _currentStrokePoints = [point];
       _drawingState.liveStrokeNotifier.start(point);
       _cancelDrawAndHoldTimer();
@@ -474,7 +607,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         final shapeType = _holdingSnappedShape!.shapeType;
 
         if (shapeType == 'line' || shapeType == 'arrow') {
-          final anchor = _holdingShapeAnchor ?? _holdingSnappedShape!.startPoint ?? _holdingSnappedShape!.bounds.topLeft;
+          final anchor =
+              _holdingShapeAnchor ??
+              _holdingSnappedShape!.startPoint ??
+              _holdingSnappedShape!.bounds.topLeft;
           final snappedPos = _snapLineAngle(anchor, currentPos);
           _holdingSnappedShape = _holdingSnappedShape!.copyWith(
             bounds: Rect.fromPoints(anchor, snappedPos),
@@ -485,54 +621,69 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           // Closed shapes (Rectangle, Square, Circle, Triangle):
           // Maintain the perfect recognized shape and scale smoothly from center if dragged
           final center = _snappedInitialBounds!.center;
-          final v0 = (_holdStationaryAnchor != null) ? (_holdStationaryAnchor! - center) : Offset.zero;
+          final v0 = (_holdStationaryAnchor != null)
+              ? (_holdStationaryAnchor! - center)
+              : Offset.zero;
           final v1 = currentPos - center;
           final initialDist = v0.distance;
           final currentDist = v1.distance;
 
-          if (initialDist > 12.0 && (currentPos - (_holdStationaryAnchor ?? currentPos)).distance > 6.0) {
+          if (initialDist > 12.0 &&
+              (currentPos - (_holdStationaryAnchor ?? currentPos)).distance >
+                  6.0) {
             final scale = (currentDist / initialDist).clamp(0.2, 5.0);
-            final newWidth = math.max(16.0, _snappedInitialBounds!.width * scale);
-            final newHeight = math.max(16.0, _snappedInitialBounds!.height * scale);
-            final newBounds = Rect.fromCenter(center: center, width: newWidth, height: newHeight);
-            _holdingSnappedShape = _holdingSnappedShape!.copyWith(bounds: newBounds);
+            final newWidth = math.max(
+              16.0,
+              _snappedInitialBounds!.width * scale,
+            );
+            final newHeight = math.max(
+              16.0,
+              _snappedInitialBounds!.height * scale,
+            );
+            final newBounds = Rect.fromCenter(
+              center: center,
+              width: newWidth,
+              height: newHeight,
+            );
+            _holdingSnappedShape = _holdingSnappedShape!.copyWith(
+              bounds: newBounds,
+            );
           }
         }
         _drawingState.liveShapeNotifier.value = _holdingSnappedShape;
         return;
       }
-      
-      final currentPos = Offset(point.x, point.y);
-      if (_holdStationaryAnchor == null || (currentPos - _holdStationaryAnchor!).distance > 8.0) {
-        _holdStationaryAnchor = currentPos;
-        _lastPointerMovePos = currentPos;
-        _lastPointerMoveTime = DateTime.now();
-        _resetDrawAndHoldTimer();
-      }
 
-      if (_currentStrokePoints.isNotEmpty) {
-        final last = _currentStrokePoints.last;
-        final dx = point.x - last.x;
-        final dy = point.y - last.y;
-        if (dx * dx + dy * dy < 0.15) {
-          // If the pencil hasn't moved a visible distance (micro-jitter or resting), 
-          // just update the pressure/tilt of the last point to prevent arrays from ballooning at 240Hz.
-          // NOTE: Threshold reduced from 0.5 to 0.15 to preserve fast handwriting fidelity —
-          // at 240Hz, Apple Pencil sends points 0.3–0.7px apart during rapid cursive.
-          _currentStrokePoints.last = point;
-          _drawingState.liveStrokeNotifier.updateLast(point);
-          return;
-        }
-      }
-
+      // Raw input is lossless: every browser-delivered sample belongs to the
+      // committed stroke, including samples with sub-pixel movement.
       _currentStrokePoints.add(point);
       // Zero-allocation live stroke append — enables 240Hz fast iPad handwriting without GC pauses
       _drawingState.liveStrokeNotifier.add(point);
+
+      // Draw-and-hold timer management:
+      // While the user is actively writing or drawing, their pen is continuously moving.
+      // Reset the hold timer whenever movement exceeds the stationary jitter threshold (8px).
+      // This guarantees the timer NEVER triggers in the middle of active handwriting!
+      final currentPos = Offset(point.x, point.y);
+      if (_holdStationaryAnchor != null) {
+        final dist = (currentPos - _holdStationaryAnchor!).distance;
+        if (dist > 8.0) {
+          _holdStationaryAnchor = currentPos;
+          _startDrawAndHoldTimer();
+        }
+      } else {
+        _holdStationaryAnchor = currentPos;
+        _startDrawAndHoldTimer();
+      }
     };
 
     _gestureManager.onStrokeEnd = (point) {
       _cancelDrawAndHoldTimer();
-      if (!_isDrawing && _currentStrokePoints.isEmpty && !_isHoldingSnappedShape) return;
+      if (!_isDrawing &&
+          _currentStrokePoints.isEmpty &&
+          !_isHoldingSnappedShape) {
+        return;
+      }
       if (widget.state.isPageViewMode) {
         final clampedX = point.x.clamp(_kPageLeft, _kPageLeft + _kPageWidth);
         final clampedY = point.y.clamp(_kPageTop, _kPageTop + _kPageHeight);
@@ -541,9 +692,15 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       if (!_isHoldingSnappedShape) {
         _currentStrokePoints.add(point);
       }
-      _drawingState.liveStrokeNotifier.clear();
       _isDrawing = false;
+      // CRITICAL: commit (addCanvasObject → notifyListeners) FIRST so the
+      // historical painter layer already contains the stroke before the live
+      // layer is cleared. Clearing live before commit creates a visibility
+      // gap where neither layer shows the stroke, causing it to disappear.
       _commitCurrentStroke();
+      // Live stroke cleared AFTER the committed object is in AppState and
+      // the historical layer has been notified. Zero-gap transition.
+      _drawingState.liveStrokeNotifier.clear();
     };
 
     _gestureManager.onStrokeCancel = ({bool discard = false}) {
@@ -563,7 +720,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           _currentStrokePoints.clear();
           _drawingState.liveStrokeNotifier.clear();
         } else {
+          // Commit FIRST (historical layer updated), THEN clear live layer.
+          // Same zero-gap ordering as onStrokeEnd.
           _commitCurrentStroke();
+          _drawingState.liveStrokeNotifier.clear();
         }
       } else {
         _drawingState.liveStrokeNotifier.clear();
@@ -583,7 +743,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     _gestureManager.onTransformUpdate = (newScale, newPan) {
       setState(() {
         _zoomScale = newScale;
-        
+
         if (widget.state.isPageViewMode) {
           final dx = _clampPanDx(newPan.dx, _zoomScale, _canvasSize);
           final dy = _clampPanDy(newPan.dy, _zoomScale, _canvasSize);
@@ -596,42 +756,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     };
 
     _gestureManager.onPanDelta = (delta) {
-      // ── GoodNotes: Two-Finger / Hand-Tool Horizontal Swipe Page Navigation ──
-      if (widget.state.isPageViewMode) {
-        final now = DateTime.now();
-        if (_lastPanDeltaTimestamp == null || now.difference(_lastPanDeltaTimestamp!).inMilliseconds > 350) {
-          _cumulativePanDeltaX = 0.0;
-        }
-        _lastPanDeltaTimestamp = now;
-
-        if (delta.dy.abs() < 24.0) {
-          _cumulativePanDeltaX += delta.dx;
-        }
-
-        if (_cumulativePanDeltaX <= -50.0) {
-          if (_lastPageSwipeTriggerTime == null || now.difference(_lastPageSwipeTriggerTime!).inMilliseconds > 800) {
-            _lastPageSwipeTriggerTime = now;
-            _cumulativePanDeltaX = 0.0;
-            final isLastPage = widget.state.currentPageIndex >= (widget.state.canvasPages.length - 1);
-            if (isLastPage) {
-              _triggerAddPageFromSwipe();
-            } else {
-              _navigateToNextPage();
-            }
-          }
-        } else if (_cumulativePanDeltaX >= 50.0 && widget.state.currentPageIndex > 0) {
-          if (_lastPageSwipeTriggerTime == null || now.difference(_lastPageSwipeTriggerTime!).inMilliseconds > 800) {
-            _lastPageSwipeTriggerTime = now;
-            _cumulativePanDeltaX = 0.0;
-            _navigateToPrevPage();
-          }
-        }
-      }
-
       setState(() {
         if (widget.state.isPageViewMode) {
-          final dx = _clampPanDx(_panOffset.dx + delta.dx, _zoomScale, _canvasSize);
-          final dy = _clampPanDy(_panOffset.dy + delta.dy, _zoomScale, _canvasSize);
+          final dx = _clampPanDx(
+            _panOffset.dx + delta.dx,
+            _zoomScale,
+            _canvasSize,
+          );
+          final dy = _clampPanDy(
+            _panOffset.dy + delta.dy,
+            _zoomScale,
+            _canvasSize,
+          );
           _panOffset = Offset(dx, dy);
           _updateActivePageFromScrollPosition();
         } else {
@@ -669,10 +805,12 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               final steps = (dist / 12.0).ceil();
               for (int s = 1; s < steps; s++) {
                 final t = s / steps;
-                _lassoPoints.add(Offset(
-                  last.dx + (worldPos.dx - last.dx) * t,
-                  last.dy + (worldPos.dy - last.dy) * t,
-                ));
+                _lassoPoints.add(
+                  Offset(
+                    last.dx + (worldPos.dx - last.dx) * t,
+                    last.dy + (worldPos.dy - last.dy) * t,
+                  ),
+                );
               }
             }
           }
@@ -684,7 +822,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     };
 
     _gestureManager.onShapeDrag = (worldPos, isStart) {
-      if (widget.state.isPageViewMode && isStart && !_isWorldPosInsidePaper(worldPos)) {
+      if (widget.state.isPageViewMode &&
+          isStart &&
+          !_isWorldPosInsidePaper(worldPos)) {
         return; // Outside paper shape drawing not allowed
       }
       setState(() {
@@ -708,83 +848,69 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   /// Commits _currentStrokePoints into the document. Separated from _onPointerUp
   /// so that both the legacy pointer path and the new gesture manager can reuse it.
+  ///
+  /// ORDERING CONTRACT:
+  ///   1. Detach immutable point copy from active buffer.
+  ///   2. Build CanvasStrokeItem.
+  ///   3. Clear active point buffer (mutable buffer is no longer needed).
+  ///   4. addCanvasObject → AppState → notifyListeners → historical painter updated.
+  ///   5. Caller (onStrokeEnd) clears liveStrokeNotifier AFTER this returns.
+  ///
+  /// Never clear the live layer inside this function — onStrokeEnd manages that
+  /// so there is zero frame-gap between the historical layer receiving the stroke
+  /// and the live layer being cleared.
   void _commitCurrentStroke() {
     _cancelDrawAndHoldTimer();
 
-    // 1. If a shape was recognized and adjusted/held via GoodNotes Draw-and-Hold, commit it directly!
+    // 1. If a shape was recognized via GoodNotes Draw-and-Hold, commit it directly.
     if (_isHoldingSnappedShape && _holdingSnappedShape != null) {
-      widget.state.addCanvasObject(_holdingSnappedShape!);
+      final shape = _holdingSnappedShape!;
       _isHoldingSnappedShape = false;
       _holdingSnappedShape = null;
       _holdingShapeAnchor = null;
       _snappedInitialBounds = null;
       _currentStrokePoints = [];
       _drawingState.liveShapeNotifier.value = null;
-      _drawingState.liveStrokeNotifier.clear();
+      // Commit to AppState — historical layer updated synchronously before caller
+      // clears the live stroke notifier.
+      widget.state.addCanvasObject(shape);
       return;
     }
 
     _drawingState.liveShapeNotifier.value = null;
 
-    final tool = widget.state.currentTool;
+    final tool = _activeStrokeTool;
     if (_currentStrokePoints.isEmpty) return;
 
     final isHighlighter = tool == CanvasTool.highlighter;
-    final processedPoints = StrokeEngine.injectVelocity(_currentStrokePoints);
-    final now = DateTime.now();
-    final totalDuration = _pointerDownTime != null ? now.difference(_pointerDownTime!).inMilliseconds : 0;
-    final holdDuration = _lastPointerMoveTime != null ? now.difference(_lastPointerMoveTime!).inMilliseconds : 0;
-    final isHeldStationary = holdDuration >= 400 && totalDuration >= 500;
-    final isShapeTool = tool == CanvasTool.rectangle || tool == CanvasTool.circle || tool == CanvasTool.line || tool == CanvasTool.arrow;
-
-    if (!isHighlighter && (_drawingState.drawAndHold || isShapeTool) && isHeldStationary && processedPoints.length >= 5) {
-      final recognizedShape = ShapeTool.recognizeShape(
-        id: 'shape-${DateTime.now().microsecondsSinceEpoch}',
-        points: processedPoints,
-        strokeColor: widget.state.strokeColor,
-        strokeWidth: widget.state.strokeWidth,
-      );
-      if (recognizedShape != null) {
-        widget.state.addCanvasObject(recognizedShape);
-        _currentStrokePoints = [];
-        _drawingState.liveStrokeNotifier.clear();
-        return;
-      }
-    }
-
-    final stab = _drawingState.strokeStabilization;
-    final smoothedPoints = (stab > 0.02 && processedPoints.length >= 3 && !isHighlighter)
-        ? StrokeSmoother.smoothList(processedPoints, stabilization: stab)
-        : processedPoints;
-
-    // Snap to straight line if highlighter straight line toggle is enabled or user held stationary
-    final pointsToCommit = (isHighlighter && (_drawingState.highlighterStraightLine || isHeldStationary) && processedPoints.length >= 2)
-        ? HighlighterTool.straightenPoints(processedPoints)
-        : smoothedPoints;
+    // Detach an immutable copy of the raw points. The active buffer
+    // (_currentStrokePoints) is cleared immediately after to free memory,
+    // but the committed stroke owns its own list — no shared-mutable aliasing.
+    final pointsToCommit = List<StrokePoint>.of(_currentStrokePoints);
+    _currentStrokePoints = []; // active buffer no longer needed
 
     final stroke = CanvasStrokeItem(
       id: 'stroke-${DateTime.now().microsecondsSinceEpoch}',
       points: pointsToCommit,
-      color: widget.state.strokeColor,
-      strokeWidth: widget.state.strokeWidth,
-      opacity: isHighlighter ? (widget.state.strokeOpacity * 0.45).clamp(0.1, 0.45) : widget.state.strokeOpacity,
+      color: _activeStrokeColor,
+      strokeWidth: _activeStrokeWidth,
+      opacity: isHighlighter
+          ? (_activeStrokeOpacity * 0.45).clamp(0.1, 0.45)
+          : _activeStrokeOpacity,
       tool: tool.name,
       penType: isHighlighter
           ? PenType.marker
-          : (tool == CanvasTool.pencil ? PenType.pencil : widget.state.currentPenType),
-      pressureSensitivity: _drawingState.pressureSensitivity,
-      tipSharpness: _drawingState.tipSharpness,
-      tipFlatness: _drawingState.tipFlatness,
+          : (tool == CanvasTool.pencil ? PenType.pencil : _activeStrokePenType),
+      pressureSensitivity: _activeStrokeSensitivity,
+      tipSharpness: _activeStrokeTipSharpness,
+      tipFlatness: _activeStrokeTipFlatness,
     );
-    if (stroke.points.length > 2 && stroke.points.length < 35) {
-      stroke.cachedInterpolatedPoints = StrokeInterpolator.interpolate(stroke.points, defaultSegments: 2);
-    }
-    _currentStrokePoints = [];
-    _drawingState.liveStrokeNotifier.clear();
+
+    // addCanvasObject calls notifyListeners synchronously inside AppState.
+    // The historical CanvasPainter will include this stroke in the SAME frame
+    // that the live stroke notifier is cleared by the caller.
     widget.state.addCanvasObject(stroke);
   }
-
-
 
   void _updateActivePageFromScrollPosition() {
     // In single-page mode, page index is strictly driven by swipe navigation and toolbar
@@ -793,7 +919,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   @override
   void didUpdateWidget(CanvasScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final docChanged  = widget.state.currentCanvasDoc?.id != _lastKnownDocId;
+    final docChanged = widget.state.currentCanvasDoc?.id != _lastKnownDocId;
     final modeChanged = widget.state.isPageViewMode != _lastKnownPageViewMode;
     final pageChanged = widget.state.currentPageIndex != _lastKnownPageIndex;
 
@@ -801,7 +927,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     _lastKnownPageViewMode = widget.state.isPageViewMode;
     _lastKnownPageIndex = widget.state.currentPageIndex;
 
-    if ((docChanged || modeChanged || pageChanged) && widget.state.isPageViewMode) {
+    if ((docChanged || modeChanged || pageChanged) &&
+        widget.state.isPageViewMode) {
       _pageViewCentered = false;
       WidgetsBinding.instance.addPostFrameCallback((_) => _centerPageInView());
     }
@@ -825,7 +952,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     if (widget.state.pressureSensitivity != _drawingState.pressureSensitivity) {
       _drawingState.setPressureSensitivity(widget.state.pressureSensitivity);
     }
-    if (widget.state.currentTool != CanvasTool.eraser && _eraserCursorPosNotifier.value != null) {
+    if (widget.state.currentTool != CanvasTool.eraser &&
+        _eraserCursorPosNotifier.value != null) {
       _eraserCursorPosNotifier.value = null;
       _isErasingActiveNotifier.value = false;
     }
@@ -836,9 +964,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     if (!mounted) return;
     final cs = _canvasSize;
     if (cs == null || cs.width < 100 || cs.height < 100) return;
-    
+
     // Fit single page so that the full page sheet is comfortably visible and framed nicely
-    final studyPanelWidth = (_isPdfStudyReaderOpen && _activePdfStudyDoc != null)
+    final studyPanelWidth =
+        (_isPdfStudyReaderOpen && _activePdfStudyDoc != null)
         ? math.min(480.0, math.max(340.0, cs.width * 0.38))
         : 0.0;
     final availableWidth = math.max(300.0, cs.width - studyPanelWidth);
@@ -881,578 +1010,847 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     final isDark = widget.state.isDarkMode;
     final bg = isDark ? const Color(0xFF141721) : const Color(0xFFF8FAFC);
     final currentTool = widget.state.currentTool;
+    final liveTool = _isDrawing ? _activeStrokeTool : currentTool;
+    final liveColor = _isDrawing
+        ? _activeStrokeColor
+        : widget.state.strokeColor;
+    final liveWidth = _isDrawing
+        ? _activeStrokeWidth
+        : widget.state.strokeWidth;
+    final liveOpacity = _isDrawing
+        ? _activeStrokeOpacity
+        : widget.state.strokeOpacity;
+    final livePenType = _isDrawing
+        ? _activeStrokePenType
+        : _drawingState.currentPenType;
+    final liveSensitivity = _isDrawing
+        ? _activeStrokeSensitivity
+        : _drawingState.pressureSensitivity;
+    final liveTipSharpness = _isDrawing
+        ? _activeStrokeTipSharpness
+        : _drawingState.tipSharpness;
+    final liveTipFlatness = _isDrawing
+        ? _activeStrokeTipFlatness
+        : _drawingState.tipFlatness;
 
     return Scaffold(
       backgroundColor: bg,
       appBar: null,
       body: SafeArea(
         bottom: true,
-        top: true, // ensure toolbar is properly padded on mobile notch / status bar
+        top:
+            true, // ensure toolbar is properly padded on mobile notch / status bar
         child: Focus(
-        focusNode: _canvasFocusNode,
-        autofocus: true,
-        onKeyEvent: (node, event) {
-          // ESC closes inline text editing or deselects all
-          if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
-            if (_isInlineTextEditing) {
-              _commitInlineText();
-              return KeyEventResult.handled;
-            }
-            if (_showPenOptionsDialog || _showLassoOptionsDialog) {
-              setState(() {
-                _showPenOptionsDialog = false;
-                _showLassoOptionsDialog = false;
-              });
-              return KeyEventResult.handled;
-            }
-            widget.state.deselectAllCanvasObjects();
-            return KeyEventResult.handled;
-          }
-
-          // Space = hand pan toggle
-          if (event.logicalKey == LogicalKeyboardKey.space) {
-            if (event is KeyDownEvent && !_spacePressed) {
-              setState(() => _spacePressed = true);
-              return KeyEventResult.handled;
-            } else if (event is KeyUpEvent && _spacePressed) {
-              setState(() => _spacePressed = false);
-              return KeyEventResult.handled;
-            }
-          }
-
-          // Keyboard tool shortcuts
-          if (event is KeyDownEvent) {
-            final isCtrl = HardwareKeyboard.instance.isControlPressed ||
-                HardwareKeyboard.instance.isMetaPressed;
-
-            // Undo / Redo
-            if (isCtrl && event.logicalKey == LogicalKeyboardKey.keyZ) {
-              if (HardwareKeyboard.instance.isShiftPressed) {
-                widget.state.redo();
-              } else {
-                widget.state.undo();
+          focusNode: _canvasFocusNode,
+          autofocus: true,
+          onKeyEvent: (node, event) {
+            // ESC closes inline text editing or deselects all
+            if (event is KeyDownEvent &&
+                event.logicalKey == LogicalKeyboardKey.escape) {
+              if (_isInlineTextEditing) {
+                _commitInlineText();
+                return KeyEventResult.handled;
               }
-              return KeyEventResult.handled;
-            }
-            if (isCtrl && (event.logicalKey == LogicalKeyboardKey.keyY)) {
-              widget.state.redo();
+              if (_showPenOptionsDialog || _showLassoOptionsDialog) {
+                setState(() {
+                  _showPenOptionsDialog = false;
+                  _showLassoOptionsDialog = false;
+                });
+                return KeyEventResult.handled;
+              }
+              widget.state.deselectAllCanvasObjects();
               return KeyEventResult.handled;
             }
 
-            // Tool shortcuts (only if no modifier)
-            if (!isCtrl && !HardwareKeyboard.instance.isAltPressed) {
-              if (event.logicalKey == LogicalKeyboardKey.keyP) {
-                widget.state.setCanvasTool(CanvasTool.pen);
+            // Space = hand pan toggle
+            if (event.logicalKey == LogicalKeyboardKey.space) {
+              if (event is KeyDownEvent && !_spacePressed) {
+                setState(() => _spacePressed = true);
                 return KeyEventResult.handled;
-              }
-              if (event.logicalKey == LogicalKeyboardKey.keyH) {
-                widget.state.setCanvasTool(CanvasTool.highlighter);
-                return KeyEventResult.handled;
-              }
-              if (event.logicalKey == LogicalKeyboardKey.keyE) {
-                widget.state.setCanvasTool(CanvasTool.eraser);
-                return KeyEventResult.handled;
-              }
-              if (event.logicalKey == LogicalKeyboardKey.keyS) {
-                widget.state.setCanvasTool(CanvasTool.lasso);
-                return KeyEventResult.handled;
-              }
-              if (event.logicalKey == LogicalKeyboardKey.keyT) {
-                widget.state.setCanvasTool(CanvasTool.text);
-                return KeyEventResult.handled;
-              }
-              if (event.logicalKey == LogicalKeyboardKey.keyV) {
-                widget.state.setCanvasTool(CanvasTool.hand);
+              } else if (event is KeyUpEvent && _spacePressed) {
+                setState(() => _spacePressed = false);
                 return KeyEventResult.handled;
               }
             }
-          }
 
-          return KeyEventResult.ignored;
-        },
-        child: Column(
-          children: [
-            // ── Goodnotes Primary Top Bar ─────────────────────────────
-            CanvasToolbar(
-              currentTool: widget.state.currentTool,
-              onToolSelected: (tool) {
-                if (tool == CanvasTool.image) {
-                  _showInsertMediaDialog(isDark);
-                  return;
-                }
-                if (tool == CanvasTool.elements) {
-                  setState(() {
-                    _showElementsPanel = !_showElementsPanel;
-                  });
-                  return;
-                }
-                widget.state.setCanvasTool(tool);
-                _drawingState.setTool(tool);
-              },
-              onOpenToolSettings: () => _openPenOptionsPopover(context),
-              canUndo: widget.state.undoStack.isNotEmpty,
-              canRedo: widget.state.redoStack.isNotEmpty,
-              onUndo: widget.state.undo,
-              onRedo: widget.state.redo,
-              currentPageIndex: widget.state.currentPageIndex,
-              totalPages: widget.state.canvasPages.isNotEmpty ? widget.state.canvasPages.length : 1,
-              onPageChanged: (idx) => _transitionToPage(idx),
-              onAddPage: _triggerAddPageFromSwipe,
-              onShareExport: () => _showExportDialog(isDark),
-              onOpenMoreMenu: () => _showDocumentMenu(isDark),
-              onToggleSidebar: () => setState(() => _showPageThumbnailsDrawer = !_showPageThumbnailsDrawer),
-              onOpenSearch: () => _openSearchDialog(isDark),
-              onOpenAiAssistant: () {
-                if (widget.state.viewMode == WorkspaceViewMode.canvasOnly) {
-                  widget.state.setViewMode(WorkspaceViewMode.split);
+            // Keyboard tool shortcuts
+            if (event is KeyDownEvent) {
+              final isCtrl =
+                  HardwareKeyboard.instance.isControlPressed ||
+                  HardwareKeyboard.instance.isMetaPressed;
+
+              // Undo / Redo
+              if (isCtrl && event.logicalKey == LogicalKeyboardKey.keyZ) {
+                if (HardwareKeyboard.instance.isShiftPressed) {
+                  widget.state.redo();
                 } else {
-                  widget.state.setViewMode(WorkspaceViewMode.canvasOnly);
+                  widget.state.undo();
                 }
-              },
-              onBack: () => widget.state.setNavIndex(0),
-              documentTitle: widget.state.currentCanvasDoc?.name ?? 'Preparing',
-              isDark: isDark,
-            ),
+                return KeyEventResult.handled;
+              }
+              if (isCtrl && event.logicalKey == LogicalKeyboardKey.keyY) {
+                widget.state.redo();
+                return KeyEventResult.handled;
+              }
 
-            // ── Canvas (full width, no left sidebar) ────────────────────────
-            Expanded(
-              child: ClipRect(
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    final cs = constraints.biggest;
-                    if (_canvasSize != cs) {
-                      _canvasSize = cs;
-                      if (widget.state.isPageViewMode && !_pageViewCentered) {
-                        WidgetsBinding.instance.addPostFrameCallback(
-                          (_) => _centerPageInView(),
-                        );
+              // Delete / Backspace selected canvas items
+              if (!_isInlineTextEditing &&
+                  (event.logicalKey == LogicalKeyboardKey.delete ||
+                      event.logicalKey == LogicalKeyboardKey.backspace)) {
+                if (widget.state.selectedCanvasObjects.isNotEmpty) {
+                  widget.state.deleteSelectedCanvasObjects();
+                  return KeyEventResult.handled;
+                }
+              }
+
+              // Tool shortcuts (only if no modifier and NOT inline text editing)
+              if (!isCtrl &&
+                  !HardwareKeyboard.instance.isAltPressed &&
+                  !_isInlineTextEditing) {
+                if (event.logicalKey == LogicalKeyboardKey.keyP) {
+                  widget.state.setCanvasTool(CanvasTool.pen);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.keyH) {
+                  widget.state.setCanvasTool(CanvasTool.highlighter);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.keyE) {
+                  widget.state.setCanvasTool(CanvasTool.eraser);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.keyL) {
+                  widget.state.setCanvasTool(CanvasTool.lasso);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.keyS) {
+                  widget.state.setCanvasTool(CanvasTool.rectangle);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.keyT) {
+                  widget.state.setCanvasTool(CanvasTool.text);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.keyV) {
+                  widget.state.setCanvasTool(CanvasTool.hand);
+                  return KeyEventResult.handled;
+                }
+              }
+            }
+
+            return KeyEventResult.ignored;
+          },
+          child: Column(
+            children: [
+              // ── Goodnotes Primary Top Bar ─────────────────────────────
+              CanvasToolbar(
+                currentTool: widget.state.currentTool,
+                onToolSelected: (tool) {
+                  if (tool == CanvasTool.image) {
+                    _showInsertMediaDialog(isDark);
+                    return;
+                  }
+                  if (tool == CanvasTool.elements) {
+                    setState(() {
+                      _showElementsPanel = !_showElementsPanel;
+                      if (_showElementsPanel) {
+                        _showPenOptionsDialog = false;
+                        _showLassoOptionsDialog = false;
                       }
-                    }
-                    return SizedBox.expand(
-                      child: Stack(
-                        fit: StackFit.expand,
-                        clipBehavior: Clip.hardEdge,
-                      children: [
-                        // Drawing surface
-                        Positioned.fill(
-                          child: ClipRect(
-                            child: ExcludeSemantics(
-                              child: MouseRegion(
-                                cursor: _getCanvasCursor(),
-                                onExit: (_) {
-                                  _eraserCursorPosNotifier.value = null;
-                                  _isErasingActiveNotifier.value = false;
-                                },
-                                child: Listener(
-                                  behavior: HitTestBehavior.opaque,
-                                  onPointerDown: _onPointerDown,
-                                  onPointerMove: _onPointerMove,
-                                  onPointerUp: _onPointerUp,
-                                  onPointerCancel: _onPointerCancel,
-                                  onPointerSignal: _onPointerSignal,
-                                  onPointerHover: _onPointerHover,
-                                  onPointerPanZoomStart: _onPointerPanZoomStart,
-                                  onPointerPanZoomUpdate: _onPointerPanZoomUpdate,
-                                  onPointerPanZoomEnd: _onPointerPanZoomEnd,
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    // 1. Static committed canvas layer (wrapped in RepaintBoundary for steady 60/120fps)
-                                    RepaintBoundary(
-                                      child: CustomPaint(
-                                        painter: CanvasPainter(
-                                          repaint: widget.state,
-                                          objects: widget.state.canvasObjects,
-                                          pages: widget.state.canvasPages,
-                                          activePageIndex: widget.state.currentPageIndex,
-                                          currentPoints: const [],
-                                          currentTool: currentTool,
-                                          currentColor: widget.state.strokeColor,
-                                          currentWidth: widget.state.strokeWidth,
-                                          currentOpacity: widget.state.strokeOpacity,
-                                          currentPenType: _drawingState.currentPenType,
-                                          pressureSensitivity: _drawingState.pressureSensitivity,
-                                          tipSharpness: _drawingState.tipSharpness,
-                                          tipFlatness: _drawingState.tipFlatness,
-                                          strokeStabilization: _drawingState.strokeStabilization,
-                                          dragStart: _dragStart,
-                                          dragCurrent: _dragCurrent,
-                                          lassoPoints: _lassoPoints,
-                                          isDark: isDark,
-                                          panOffset: _panOffset,
-                                          zoomScale: _zoomScale,
-                                          paperStyle: widget.state.canvasPaperStyle,
-                                          isPageViewMode: widget.state.isPageViewMode,
-                                          pageTitle: widget.state.currentPage?.title ?? 'Page ${widget.state.currentPageIndex + 1}',
-                                          pageNumber: widget.state.currentPageIndex + 1,
-                                          totalPages: widget.state.canvasPages.isNotEmpty ? widget.state.canvasPages.length : 1,
-                                          selectedTextItemId: _selectedTextItemId,
-                                          editingExistingTextId: _isInlineTextEditing ? _editingExistingTextId : null,
-                                          isDrawingTape: _isDrawingTape,
-                                          tapeStartWorld: _tapeStartWorld,
-                                          tapeCurrentWorld: _tapeCurrentWorld,
-                                          tapeColor: _drawingState.tapeColor,
-                                          tapeHeight: _drawingState.tapeHeight,
-                                          imageCache: _decodedImagesCache,
-                                          loadingImages: _loadingImages,
-                                          onImageDecoded: () => setState(() {}),
-                                          isTransitioning: _isTransitioning,
-                                          transitionFromPageIndex: _transitionFromPageIndex,
-                                          transitionToPageIndex: _transitionToPageIndex,
-                                          transitionProgress: _slideAnim.value,
-                                          transitionDirection: _slideDirection,
-                                          sheetPullOffset: _sheetDragOffset,
-                                        ),
-                                        child: const SizedBox.expand(),
-                                      ),
-                                    ),
+                    });
+                    return;
+                  }
+                  widget.state.setCanvasTool(tool);
+                  _drawingState.setTool(tool);
+                },
+                onOpenToolSettings: () => _openPenOptionsPopover(context),
+                canUndo: widget.state.undoStack.isNotEmpty,
+                canRedo: widget.state.redoStack.isNotEmpty,
+                onUndo: widget.state.undo,
+                onRedo: widget.state.redo,
+                currentPageIndex: widget.state.currentPageIndex,
+                totalPages: widget.state.canvasPages.isNotEmpty
+                    ? widget.state.canvasPages.length
+                    : 1,
+                onPageChanged: (idx) => _transitionToPage(idx),
+                onAddPage: _triggerAddPageFromSwipe,
+                onShareExport: () => _showExportDialog(isDark),
+                onOpenMoreMenu: () => _showDocumentMenu(isDark),
+                onToggleSidebar: () => setState(
+                  () => _showPageThumbnailsDrawer = !_showPageThumbnailsDrawer,
+                ),
+                onOpenSearch: () => _openSearchDialog(isDark),
+                onOpenAiAssistant: () {
+                  if (widget.state.viewMode == WorkspaceViewMode.canvasOnly) {
+                    widget.state.setViewMode(WorkspaceViewMode.split);
+                  } else {
+                    widget.state.setViewMode(WorkspaceViewMode.canvasOnly);
+                  }
+                },
+                onBack: () => widget.state.setNavIndex(0),
+                documentTitle:
+                    widget.state.currentCanvasDoc?.name ?? 'Preparing',
+                isDark: isDark,
+              ),
 
-                                    // 2. High-performance isolated live stroke layer (repaints only on pointer events)
-                                    RepaintBoundary(
-                                      child: CustomPaint(
-                                        painter: _LiveStrokePainter(
-                                          notifier: _drawingState.liveStrokeNotifier,
-                                          shapeNotifier: _drawingState.liveShapeNotifier,
-                                          tool: currentTool,
-                                          color: widget.state.strokeColor,
-                                          strokeWidth: widget.state.strokeWidth,
-                                          opacity: widget.state.strokeOpacity,
-                                          penType: _drawingState.currentPenType,
-                                          sensitivity: _drawingState.pressureSensitivity,
-                                          tipSharpness: _drawingState.tipSharpness,
-                                          tipFlatness: _drawingState.tipFlatness,
-                                          panOffset: _panOffset,
-                                          zoomScale: _zoomScale,
-                                          isPageViewMode: widget.state.isPageViewMode,
-                                          pageNumber: widget.state.currentPageIndex + 1,
-                                          highlighterStraightLine: _drawingState.highlighterStraightLine,
-                                        ),
-                                        child: const SizedBox.expand(),
-                                      ),
-                                    ),
+              // ── Canvas (full width, no left sidebar) ────────────────────────
+              Expanded(
+                child: ClipRect(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final cs = constraints.biggest;
+                      if (_canvasSize != cs) {
+                        _canvasSize = cs;
+                        if (widget.state.isPageViewMode && !_pageViewCentered) {
+                          WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => _centerPageInView(),
+                          );
+                        }
+                      }
+                      return SizedBox.expand(
+                        child: Stack(
+                          fit: StackFit.expand,
+                          clipBehavior: Clip.hardEdge,
+                          children: [
+                            // Drawing surface
+                            Positioned.fill(
+                              child: ClipRect(
+                                child: ExcludeSemantics(
+                                  child: MouseRegion(
+                                    cursor: _getCanvasCursor(),
+                                    onExit: (_) {
+                                      _eraserCursorPosNotifier.value = null;
+                                      _isErasingActiveNotifier.value = false;
+                                    },
+                                    child: Listener(
+                                      behavior: HitTestBehavior.opaque,
+                                      onPointerDown: _onPointerDown,
+                                      onPointerMove: _onPointerMove,
+                                      onPointerUp: _onPointerUp,
+                                      onPointerCancel: _onPointerCancel,
+                                      onPointerSignal: _onPointerSignal,
+                                      onPointerHover: _onPointerHover,
+                                      onPointerPanZoomStart:
+                                          _onPointerPanZoomStart,
+                                      onPointerPanZoomUpdate:
+                                          _onPointerPanZoomUpdate,
+                                      onPointerPanZoomEnd: _onPointerPanZoomEnd,
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          // 1. Static committed canvas layer (wrapped in RepaintBoundary for steady 60/120fps)
+                                          RepaintBoundary(
+                                            child: CustomPaint(
+                                              painter: CanvasPainter(
+                                                appState: widget.state,
+                                                // Use the dedicated canvasObjectsNotifier so this layer ONLY
+                                                // repaints when strokes/objects change — NOT on toolbar picks,
+                                                // autosave status updates, or any other AppState mutation.
+                                                repaint: widget.state.canvasObjectsNotifier,
+                                                objects:
+                                                    widget.state.canvasObjects,
+                                                pages: widget.state.canvasPages,
+                                                activePageIndex: widget
+                                                    .state
+                                                    .currentPageIndex,
+                                                currentPoints: const [],
+                                                currentTool: currentTool,
+                                                currentColor:
+                                                    widget.state.strokeColor,
+                                                currentWidth:
+                                                    widget.state.strokeWidth,
+                                                currentOpacity:
+                                                    widget.state.strokeOpacity,
+                                                currentPenType: _drawingState
+                                                    .currentPenType,
+                                                pressureSensitivity:
+                                                    _drawingState
+                                                        .pressureSensitivity,
+                                                tipSharpness:
+                                                    _drawingState.tipSharpness,
+                                                tipFlatness:
+                                                    _drawingState.tipFlatness,
+                                                strokeStabilization:
+                                                    _drawingState
+                                                        .strokeStabilization,
+                                                dragStart: _dragStart,
+                                                dragCurrent: _dragCurrent,
+                                                lassoPoints: _lassoPoints,
+                                                isDark: isDark,
+                                                panOffset: _panOffset,
+                                                zoomScale: _zoomScale,
+                                                paperStyle: widget
+                                                    .state
+                                                    .canvasPaperStyle,
+                                                isPageViewMode:
+                                                    widget.state.isPageViewMode,
+                                                pageTitle:
+                                                    widget
+                                                        .state
+                                                        .currentPage
+                                                        ?.title ??
+                                                    'Page ${widget.state.currentPageIndex + 1}',
+                                                pageNumber:
+                                                    widget
+                                                        .state
+                                                        .currentPageIndex +
+                                                    1,
+                                                totalPages:
+                                                    widget
+                                                        .state
+                                                        .canvasPages
+                                                        .isNotEmpty
+                                                    ? widget
+                                                          .state
+                                                          .canvasPages
+                                                          .length
+                                                    : 1,
+                                                selectedTextItemId:
+                                                    _selectedTextItemId,
+                                                selectedImageId:
+                                                    _selectedImageId,
+                                                editingExistingTextId:
+                                                    _isInlineTextEditing
+                                                    ? _editingExistingTextId
+                                                    : null,
+                                                isDrawingTape: _isDrawingTape,
+                                                tapeStartWorld: _tapeStartWorld,
+                                                tapeCurrentWorld:
+                                                    _tapeCurrentWorld,
+                                                tapeColor:
+                                                    _drawingState.tapeColor,
+                                                tapeHeight:
+                                                    _drawingState.tapeHeight,
+                                                imageCache: _decodedImagesCache,
+                                                loadingImages: _loadingImages,
+                                                onImageDecoded: () =>
+                                                    setState(() {}),
+                                                isTransitioning:
+                                                    _isTransitioning,
+                                                transitionFromPageIndex:
+                                                    _transitionFromPageIndex,
+                                                transitionToPageIndex:
+                                                    _transitionToPageIndex,
+                                                transitionProgress:
+                                                    _slideAnim.value,
+                                                transitionDirection:
+                                                    _slideDirection,
+                                                sheetPullOffset:
+                                                    _sheetDragOffset,
+                                              ),
+                                              child: const SizedBox.expand(),
+                                            ),
+                                          ),
 
-                                    // 3. Clean zero-latency eraser reticle (white inner circle + black border)
-                                    RepaintBoundary(
-                                      child: CustomPaint(
-                                        painter: _EraserReticlePainter(
-                                          posNotifier: _eraserCursorPosNotifier,
-                                          radius: _effectiveEraserScreenRadius,
-                                          isVisible: currentTool == CanvasTool.eraser,
-                                        ),
-                                        child: const SizedBox.expand(),
+                                          // 2. High-performance isolated live stroke layer (repaints only on pointer events)
+                                          RepaintBoundary(
+                                            child: CustomPaint(
+                                              painter: _LiveStrokePainter(
+                                                notifier: _drawingState
+                                                    .liveStrokeNotifier,
+                                                shapeNotifier: _drawingState
+                                                    .liveShapeNotifier,
+                                                tool: liveTool,
+                                                color: liveColor,
+                                                strokeWidth: liveWidth,
+                                                opacity: liveOpacity,
+                                                penType: livePenType,
+                                                sensitivity: liveSensitivity,
+                                                tipSharpness: liveTipSharpness,
+                                                tipFlatness: liveTipFlatness,
+                                                panOffset: _panOffset,
+                                                zoomScale: _zoomScale,
+                                                isPageViewMode:
+                                                    widget.state.isPageViewMode,
+                                                pageNumber:
+                                                    widget
+                                                        .state
+                                                        .currentPageIndex +
+                                                    1,
+                                                highlighterStraightLine:
+                                                    _drawingState
+                                                        .highlighterStraightLine,
+                                              ),
+                                              child: const SizedBox.expand(),
+                                            ),
+                                          ),
+
+                                          // 3. Clean zero-latency eraser reticle (white inner circle + black border)
+                                          RepaintBoundary(
+                                            child: CustomPaint(
+                                              painter: _EraserReticlePainter(
+                                                posNotifier:
+                                                    _eraserCursorPosNotifier,
+                                                radius:
+                                                    _effectiveEraserScreenRadius,
+                                                isVisible:
+                                                    currentTool ==
+                                                    CanvasTool.eraser,
+                                              ),
+                                              child: const SizedBox.expand(),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
-                                  ],
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        ),
-                      ),
 
-                      // ── Floating Secondary Toolbar (Top Center) ─────────
-                      Positioned(
-                        top: 10,
-                        left: 0,
-                        right: 0,
-                        child: Center(
-                          child: FloatingSecondaryToolbar(
-                            state: _drawingState,
-                            onOpenPenOptions: () => setState(() {
-                              _showPenOptionsDialog = !_showPenOptionsDialog;
-                              if (_showPenOptionsDialog) _showLassoOptionsDialog = false;
-                            }),
-                            onOpenLassoOptions: () => setState(() {
-                              _showLassoOptionsDialog = !_showLassoOptionsDialog;
-                              if (_showLassoOptionsDialog) _showPenOptionsDialog = false;
-                            }),
-                            onClearPage: widget.state.clearCanvas,
-                            isDark: isDark,
-                          ),
-                        ),
-                      ),
-
-
-
-                      // ── Laser Pointer Overlay ──────────────────────────────
-                      if (widget.state.currentTool == CanvasTool.laser && (_laserStrokes.isNotEmpty || _activeLaserPoint != null))
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            child: CustomPaint(
-                              painter: _LaserPointerPainter(
-                                strokes: _laserStrokes.map((s) => List<_LaserPoint>.from(s)).toList(),
-                                color: _drawingState.laserColor,
-                                mode: _drawingState.laserMode,
-                                activePoint: _activeLaserPoint,
-                                isDrawing: _isDrawing,
-                                dotAlpha: _laserDotAlpha,
-                                masterFade: _laserMasterFade,
-                                isPageViewMode: widget.state.isPageViewMode,
-                                panOffset: _panOffset,
-                                zoomScale: _zoomScale,
-                                totalPages: widget.state.canvasPages.isNotEmpty ? widget.state.canvasPages.length : 1,
+                            // ── Floating Secondary Toolbar (Top Center) ─────────
+                            if (widget.state.selectedCanvasObjects.isEmpty)
+                              Positioned(
+                                top: 10,
+                                left: 0,
+                                right: 0,
+                                child: Center(
+                                  child: FloatingSecondaryToolbar(
+                                  state: _drawingState,
+                                  onOpenPenOptions: () => setState(() {
+                                    _showPenOptionsDialog =
+                                        !_showPenOptionsDialog;
+                                    if (_showPenOptionsDialog) {
+                                      _showLassoOptionsDialog = false;
+                                      _showElementsPanel = false;
+                                    }
+                                  }),
+                                  onOpenLassoOptions: () => setState(() {
+                                    _showLassoOptionsDialog =
+                                        !_showLassoOptionsDialog;
+                                    if (_showLassoOptionsDialog) {
+                                      _showPenOptionsDialog = false;
+                                      _showElementsPanel = false;
+                                    }
+                                  }),
+                                  onClearPage: widget.state.clearCanvas,
+                                  isDark: isDark,
+                                ),
                               ),
                             ),
-                          ),
-                        ),
 
-                      // Interactive AI note cards
-                      ...widget.state.canvasObjects
-                          .whereType<CanvasNoteCardItem>()
-                          .map((card) {
-                            final screenPos = _worldToScreen(card.position);
-                            return Positioned(
-                              left: screenPos.dx,
-                              top: screenPos.dy,
-                              child: Transform.scale(
-                                scale: _zoomScale,
-                                alignment: Alignment.topLeft,
-                                child: _buildInteractiveCanvasCard(card, isDark),
+                            // ── Laser Pointer Overlay ──────────────────────────────
+                            if (widget.state.currentTool == CanvasTool.laser &&
+                                (_laserStrokes.isNotEmpty ||
+                                    _activeLaserPoint != null))
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _LaserPointerPainter(
+                                      strokes: _laserStrokes
+                                          .map((s) => List<_LaserPoint>.from(s))
+                                          .toList(),
+                                      color: _drawingState.laserColor,
+                                      mode: _drawingState.laserMode,
+                                      activePoint: _activeLaserPoint,
+                                      isDrawing: _isDrawing,
+                                      dotAlpha: _laserDotAlpha,
+                                      masterFade: _laserMasterFade,
+                                      isPageViewMode:
+                                          widget.state.isPageViewMode,
+                                      panOffset: _panOffset,
+                                      zoomScale: _zoomScale,
+                                      totalPages:
+                                          widget.state.canvasPages.isNotEmpty
+                                          ? widget.state.canvasPages.length
+                                          : 1,
+                                    ),
+                                  ),
+                                ),
                               ),
-                            );
-                          }),
 
-                      // ── Inline Text Editor ───────────────────────────────────
-                      if (_isInlineTextEditing)
-                        Positioned(
-                          left: _inlineTextScreenPos.dx,
-                          top: _inlineTextScreenPos.dy,
-                          child: _buildInlineTextEditor(isDark),
-                        ),
-
-                      // ── Floating Text Formatting Toolbar ──────────────────────
-                      if (_selectedTextItemId != null && _showTextFormatToolbar) ...[
-                        Builder(
-                          builder: (context) {
-                            final textItem = _getSelectedTextItem();
-                            if (textItem == null) return const SizedBox.shrink();
-                            final screenPos = _worldToScreen(textItem.position);
-                            final maxW = _canvasSize?.width ?? 800;
-                            final maxH = _canvasSize?.height ?? 600;
-                            final left = (screenPos.dx - 40).clamp(12.0, math.max(12.0, maxW - 680)).toDouble();
-                            final top = (screenPos.dy - 78).clamp(12.0, math.max(12.0, maxH - 60)).toDouble();
-
-                            return Positioned(
-                              left: left,
-                              top: top,
-                              child: FloatingTextToolbar(
-                                textItem: textItem,
-                                isDark: isDark,
-                                onUpdate: (updated) {
-                                  widget.state.updateCanvasTextItem(updated);
-                                },
-                                onEditText: () {
-                                  _startInlineTextEditing(screenPos, existingItem: textItem);
-                                },
-                                onDuplicate: () {
-                                  final dup = textItem.copyWith(
-                                    id: 'text-${DateTime.now().millisecondsSinceEpoch}',
-                                    position: textItem.position + const Offset(20, 20),
+                            // Interactive AI note cards
+                            ...widget.state.canvasObjects
+                                .whereType<CanvasNoteCardItem>()
+                                .map((card) {
+                                  final screenPos = _worldToScreen(
+                                    card.position,
                                   );
-                                  widget.state.addCanvasObject(dup);
-                                  setState(() {
-                                    _selectedTextItemId = dup.id;
-                                  });
-                                },
-                                onDelete: () {
-                                  widget.state.removeCanvasObject(textItem);
-                                  setState(() {
-                                    _selectedTextItemId = null;
-                                    _showTextFormatToolbar = false;
-                                  });
-                                },
-                                onClose: () {
-                                  setState(() {
-                                    _selectedTextItemId = null;
-                                    _showTextFormatToolbar = false;
-                                  });
+                                  return Positioned(
+                                    left: screenPos.dx,
+                                    top: screenPos.dy,
+                                    child: Transform.scale(
+                                      scale: _zoomScale,
+                                      alignment: Alignment.topLeft,
+                                      child: _buildInteractiveCanvasCard(
+                                        card,
+                                        isDark,
+                                      ),
+                                    ),
+                                  );
+                                }),
+
+                            // ── Inline Text Editor ───────────────────────────────────
+                            if (_isInlineTextEditing)
+                              Positioned(
+                                left: _inlineTextScreenPos.dx,
+                                top: _inlineTextScreenPos.dy,
+                                child: _buildInlineTextEditor(isDark),
+                              ),
+
+                            // ── Floating Text Formatting Toolbar ──────────────────────
+                            if (_selectedTextItemId != null &&
+                                _showTextFormatToolbar) ...[
+                              Builder(
+                                builder: (context) {
+                                  final textItem = _getSelectedTextItem();
+                                  if (textItem == null) {
+                                    return const SizedBox.shrink();
+                                   }
+                                  final screenPos = _worldToScreen(
+                                    textItem.position,
+                                  );
+                                  final maxW = _canvasSize?.width ?? 800;
+                                  final maxH = _canvasSize?.height ?? 600;
+                                  final left = (screenPos.dx - 40)
+                                      .clamp(12.0, math.max(12.0, maxW - 680))
+                                      .toDouble();
+                                  final top = (screenPos.dy - 78)
+                                      .clamp(12.0, math.max(12.0, maxH - 60))
+                                      .toDouble();
+
+                                  return Positioned(
+                                    left: left,
+                                    top: top,
+                                    child: FloatingTextToolbar(
+                                      textItem: textItem,
+                                      isDark: isDark,
+                                      onUpdate: (updated) {
+                                        widget.state.updateCanvasTextItem(
+                                          updated,
+                                        );
+                                      },
+                                      onEditText: () {
+                                        _startInlineTextEditing(
+                                          screenPos,
+                                          existingItem: textItem,
+                                        );
+                                      },
+                                      onDuplicate: () {
+                                        final dup = textItem.copyWith(
+                                          id: 'text-${DateTime.now().millisecondsSinceEpoch}',
+                                          position:
+                                              textItem.position +
+                                              const Offset(20, 20),
+                                        );
+                                        widget.state.addCanvasObject(dup);
+                                        setState(() {
+                                          _selectedTextItemId = dup.id;
+                                        });
+                                      },
+                                      onDelete: () {
+                                        widget.state.removeCanvasObject(
+                                          textItem,
+                                        );
+                                        setState(() {
+                                          _selectedTextItemId = null;
+                                          _showTextFormatToolbar = false;
+                                        });
+                                      },
+                                      onClose: () {
+                                        setState(() {
+                                          _selectedTextItemId = null;
+                                          _showTextFormatToolbar = false;
+                                        });
+                                      },
+                                    ),
+                                  );
                                 },
                               ),
-                            );
-                          },
-                        ),
-                      ],
+                            ],
 
-                      // ── Elements & Stickers Popover Panel ────────────────────
-                      if (_showElementsPanel)
-                        Positioned(
-                          top: 14,
-                          left: (((_canvasSize?.width ?? 600) / 2) - 170).clamp(12.0, double.infinity),
-                          child: ElementsStickersPanel(
-                            isDark: isDark,
-                            onSelectElement: _onSelectCanvasElement,
-                            onClose: () => setState(() => _showElementsPanel = false),
-                          ),
-                        ),
+                            // ── Floating Image Toolbar ──────────────────────────────
+                            if (_selectedImageId != null) ...[
+                              Builder(
+                                builder: (context) {
+                                  final imgItem = _getSelectedImageItem();
+                                  if (imgItem == null) return const SizedBox.shrink();
+                                  final screenPos = _worldToScreen(imgItem.bounds.topLeft);
+                                  final maxW = _canvasSize?.width ?? 800;
+                                  final maxH = _canvasSize?.height ?? 600;
+                                  final left = (screenPos.dx)
+                                      .clamp(12.0, math.max(12.0, maxW - 320))
+                                      .toDouble();
+                                  final top = (screenPos.dy - 56)
+                                      .clamp(12.0, math.max(12.0, maxH - 60))
+                                      .toDouble();
+
+                                  return Positioned(
+                                    left: left,
+                                    top: top,
+                                    child: Material(
+                                      elevation: 6,
+                                      borderRadius: BorderRadius.circular(12),
+                                      color: isDark ? const Color(0xFF1E2436) : Colors.white,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(12),
+                                          border: Border.all(
+                                            color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6),
+                                              child: Text(
+                                                '🖼️ ${imgItem.bounds.width.toInt()}×${imgItem.bounds.height.toInt()}',
+                                                style: GoogleFonts.inter(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: isDark ? Colors.white70 : const Color(0xFF475569),
+                                                ),
+                                              ),
+                                            ),
+                                            Container(
+                                              height: 16,
+                                              width: 1,
+                                              color: isDark ? Colors.white24 : Colors.black12,
+                                              margin: const EdgeInsets.symmetric(horizontal: 4),
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.copy_rounded, size: 16),
+                                              tooltip: 'Duplicate Image',
+                                              onPressed: () {
+                                                final dup = imgItem.copyWith(
+                                                  id: 'img-${DateTime.now().millisecondsSinceEpoch}',
+                                                  bounds: imgItem.bounds.shift(const Offset(30, 30)),
+                                                );
+                                                if (_decodedImagesCache.containsKey(imgItem.id)) {
+                                                  _decodedImagesCache[dup.id] = _decodedImagesCache[imgItem.id]!;
+                                                }
+                                                widget.state.addCanvasObject(dup);
+                                                setState(() {
+                                                  _selectedImageId = dup.id;
+                                                });
+                                              },
+                                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                              padding: EdgeInsets.zero,
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.delete_outline_rounded, size: 17, color: Color(0xFFEF4444)),
+                                              tooltip: 'Delete Image',
+                                              onPressed: () {
+                                                widget.state.removeCanvasObject(imgItem);
+                                                setState(() {
+                                                  _selectedImageId = null;
+                                                });
+                                              },
+                                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                              padding: EdgeInsets.zero,
+                                            ),
+                                            IconButton(
+                                              icon: const Icon(Icons.check_rounded, size: 16, color: Color(0xFF10B981)),
+                                              tooltip: 'Done',
+                                              onPressed: () {
+                                                setState(() {
+                                                  _selectedImageId = null;
+                                                });
+                                              },
+                                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                              padding: EdgeInsets.zero,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
 
 
-
-                      // ── Zoom / Pan Controls (bottom right) ─────────────────
-                      Builder(
-                        builder: (context) {
-                          final isMobile = MediaQuery.of(context).size.width < 640;
-                          // In mobile page view mode, zoom controls are integrated into the bottom floating page bar to prevent overlap
-                          if (isMobile && widget.state.isPageViewMode) {
-                            return const SizedBox.shrink();
-                          }
-                          if (isMobile) {
-                            return Positioned(
-                              bottom: 14,
-                              left: 0,
-                              right: 0,
-                              child: Center(child: _buildTravelControls(isDark)),
-                            );
-                          }
-                          return Positioned(
-                            bottom: 14,
-                            right: 14,
-                            child: _buildTravelControls(isDark),
-                          );
-                        },
-                      ),
-
-                      // ── Page Thumbnails Drawer (Left side) ─────────────────
-                      if (_showPageThumbnailsDrawer)
-                        Positioned(
-                          top: 0,
-                          bottom: 0,
-                          left: 0,
-                          child: _buildPageThumbnailsDrawer(isDark),
-                        ),
-
-                      // ── Apple Pencil Telemetry HUD (Bottom Left) ───────────
-                      if (_showDiagnosticHud)
-                        Positioned(
-                          bottom: 20,
-                          left: _showPageThumbnailsDrawer ? 336 : 20,
-                          child: _buildDiagnosticHud(isDark),
-                        ),
-
-                      // ── Floating Contextual Toolbar for Selection ────────────
-                      if (widget.state.selectedCanvasObjects.isNotEmpty)
-                        Positioned(
-                          top: 14,
-                          left: 0,
-                          right: 0,
-                          child: Center(
-                            child: ContextualToolbar(
-                              selectedObjects: widget.state.selectedCanvasObjects,
-                              isDark: isDark,
-                              onDuplicate: () {
-                                final duplicates = <CanvasObjectItem>[];
-                                for (final obj in widget.state.selectedCanvasObjects) {
-                                  if (obj is CanvasStrokeItem) {
-                                    final shiftedPoints = obj.points.map((p) => p.copyWith(x: p.x + 20, y: p.y + 20)).toList();
-                                    duplicates.add(obj.copyWith(
-                                      id: 'stroke-${DateTime.now().microsecondsSinceEpoch}-${duplicates.length}',
-                                      points: shiftedPoints,
-                                      isSelected: true,
-                                    ));
-                                  }
+                            // ── Zoom / Pan Controls (bottom right) ─────────────────
+                            Builder(
+                              builder: (context) {
+                                final isMobile =
+                                    MediaQuery.of(context).size.width < 640;
+                                // In mobile page view mode, zoom controls are integrated into the bottom floating page bar to prevent overlap
+                                if (isMobile && widget.state.isPageViewMode) {
+                                  return const SizedBox.shrink();
                                 }
-                                widget.state.deselectAllCanvasObjects();
-                                for (final d in duplicates) {
-                                  widget.state.addCanvasObject(d);
+                                if (isMobile) {
+                                  return Positioned(
+                                    bottom: 14,
+                                    left: 0,
+                                    right: 0,
+                                    child: Center(
+                                      child: _buildTravelControls(isDark),
+                                    ),
+                                  );
                                 }
+                                return Positioned(
+                                  bottom: 14,
+                                  right: 14,
+                                  child: _buildTravelControls(isDark),
+                                );
                               },
-                              onDelete: () {
-                                final ids = widget.state.selectedCanvasObjects.map((o) => o.id).toSet();
-                                widget.state.canvasObjects.removeWhere((o) => ids.contains(o.id));
-                                widget.state.clearCanvasSelection();
-                              },
-                              onRecolor: (newColor) => widget.state.recolorSelectedCanvasObjects(newColor),
-                              onBringToFront: widget.state.bringSelectedCanvasObjectsToFront,
-                              onSendToBack: widget.state.sendSelectedCanvasObjectsToBack,
-                              onDeselect: widget.state.deselectAllCanvasObjects,
                             ),
-                          ),
-                        ),
-                      // ── GoodNotes Right-to-Left Pull to Add Page Indicator & Page Controls ───
-                      if (widget.state.isPageViewMode) ...[
-                        _buildPullToAddPageIndicator(isDark),
-                        _buildPullToPrevPageIndicator(isDark),
-                        _buildBottomFloatingPageBar(isDark),
-                        _buildPageSwipeToast(isDark),
-                      ],
 
-                      // ── Goodnotes Floating Popovers with Tap-Outside Dismiss Barrier (Always on Top) ──
-                      if (_showPenOptionsDialog || _showLassoOptionsDialog) ...[
-                        Positioned.fill(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: () => setState(() {
-                              _showPenOptionsDialog = false;
-                              _showLassoOptionsDialog = false;
-                            }),
-                            child: Container(
-                              color: Colors.black.withValues(alpha: 0.12),
-                            ),
-                          ),
-                        ),
-                        if (_showPenOptionsDialog)
-                          Positioned(
-                            top: 60,
-                            left: 0,
-                            right: 0,
-                            child: Center(
-                              child: FloatingPenOptionsDialog(
-                                drawingState: _drawingState,
-                                isDark: isDark,
-                                onClose: () => setState(() => _showPenOptionsDialog = false),
+                            // ── Page Thumbnails Drawer (Left side) ─────────────────
+                            if (_showPageThumbnailsDrawer)
+                              Positioned(
+                                top: 0,
+                                bottom: 0,
+                                left: 0,
+                                child: _buildPageThumbnailsDrawer(isDark),
                               ),
-                            ),
-                          ),
-                        if (_showLassoOptionsDialog)
-                          Positioned(
-                            top: 60,
-                            left: 0,
-                            right: 0,
-                            child: Center(
-                              child: FloatingLassoOptionsDialog(
-                                drawingState: _drawingState,
-                                isDark: isDark,
-                                onClose: () => setState(() => _showLassoOptionsDialog = false),
-                              ),
-                            ),
-                          ),
-                      ],
 
-                      // ── GoodNotes Side-by-Side PDF Study Split-Screen Panel ───
-                      if (_isPdfStudyReaderOpen && _activePdfStudyDoc != null)
-                        Positioned(
-                          top: 0,
-                          bottom: 0,
-                          right: 0,
-                          child: GoodNotesPdfStudyPanel(
-                            document: _activePdfStudyDoc!,
-                            isDark: isDark,
-                            onClose: () {
-                              setState(() {
-                                _isPdfStudyReaderOpen = false;
-                              });
-                              _centerPageInView();
-                            },
-                            onInsertPageToNotebook: (pageNum, text) {
-                              _insertPdfPageContentToNotebook(_activePdfStudyDoc!, pageNum, text);
-                            },
-                            onCopyTextToCanvas: (text) {
-                              _addPdfExcerptNoteCard(text);
-                            },
-                            onImportAllToNotebook: () {
-                              _importPdfPagesToNotebook(_activePdfStudyDoc!);
-                            },
-                          ),
+                            // ── Apple Pencil Telemetry HUD (Bottom Left) ───────────
+                            if (_showDiagnosticHud)
+                              Positioned(
+                                bottom: 20,
+                                left: _showPageThumbnailsDrawer ? 336 : 20,
+                                child: _buildDiagnosticHud(isDark),
+                              ),
+
+                            // ── Floating Contextual Toolbar for Selection ────────────
+                            if (widget.state.selectedCanvasObjects.isNotEmpty)
+                              Positioned(
+                                top: 10,
+                                left: 0,
+                                right: 0,
+                                child: Center(
+                                  child: ContextualToolbar(
+                                    selectedObjects:
+                                        widget.state.selectedCanvasObjects,
+                                    isDark: isDark,
+                                    onDuplicate: widget
+                                        .state
+                                        .duplicateSelectedCanvasObjects,
+                                    onDelete: widget
+                                        .state
+                                        .deleteSelectedCanvasObjects,
+                                    onRecolor: (newColor) => widget.state
+                                        .recolorSelectedCanvasObjects(newColor),
+                                    onBringToFront: widget
+                                        .state
+                                        .bringSelectedCanvasObjectsToFront,
+                                    onSendToBack: widget
+                                        .state
+                                        .sendSelectedCanvasObjectsToBack,
+                                    onDeselect:
+                                        widget.state.deselectAllCanvasObjects,
+                                  ),
+                                ),
+                              ),
+                            // ── GoodNotes Right-to-Left Pull to Add Page Indicator & Page Controls ───
+                            if (widget.state.isPageViewMode) ...[
+                              _buildPullToAddPageIndicator(isDark),
+                              _buildPullToPrevPageIndicator(isDark),
+                              _buildBottomFloatingPageBar(isDark),
+                              _buildPageSwipeToast(isDark),
+                            ],
+
+                            // ── Goodnotes Floating Popovers with Tap-Outside Dismiss Barrier (Always on Top) ──
+                            if (_showPenOptionsDialog ||
+                                _showLassoOptionsDialog ||
+                                _showElementsPanel) ...[
+                              Positioned.fill(
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => setState(() {
+                                    _showPenOptionsDialog = false;
+                                    _showLassoOptionsDialog = false;
+                                    _showElementsPanel = false;
+                                  }),
+                                  child: Container(
+                                    color: Colors.black.withValues(alpha: 0.12),
+                                  ),
+                                ),
+                              ),
+                              if (_showPenOptionsDialog)
+                                Positioned(
+                                  top: 60,
+                                  left: 0,
+                                  right: 0,
+                                  child: Center(
+                                    child: FloatingPenOptionsDialog(
+                                      drawingState: _drawingState,
+                                      isDark: isDark,
+                                      onClose: () => setState(
+                                        () => _showPenOptionsDialog = false,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              if (_showLassoOptionsDialog)
+                                Positioned(
+                                  top: 60,
+                                  left: 0,
+                                  right: 0,
+                                  child: Center(
+                                    child: FloatingLassoOptionsDialog(
+                                      drawingState: _drawingState,
+                                      isDark: isDark,
+                                      onClose: () => setState(
+                                        () => _showLassoOptionsDialog = false,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              if (_showElementsPanel)
+                                Positioned(
+                                  top: 60,
+                                  left: 0,
+                                  right: 0,
+                                  child: Center(
+                                    child: ElementsStickersPanel(
+                                      isDark: isDark,
+                                      onSelectElement: _onSelectCanvasElement,
+                                      onClose: () => setState(
+                                        () => _showElementsPanel = false,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
+
+                            // ── GoodNotes Side-by-Side PDF Study Split-Screen Panel ───
+                            if (_isPdfStudyReaderOpen &&
+                                _activePdfStudyDoc != null)
+                              Positioned(
+                                top: 0,
+                                bottom: 0,
+                                right: 0,
+                                child: GoodNotesPdfStudyPanel(
+                                  document: _activePdfStudyDoc!,
+                                  isDark: isDark,
+                                  onClose: () {
+                                    setState(() {
+                                      _isPdfStudyReaderOpen = false;
+                                    });
+                                    _centerPageInView();
+                                  },
+                                  onInsertPageToNotebook: (pageNum, text) {
+                                    _insertPdfPageContentToNotebook(
+                                      _activePdfStudyDoc!,
+                                      pageNum,
+                                      text,
+                                    );
+                                  },
+                                  onCopyTextToCanvas: (text) {
+                                    _addPdfExcerptNoteCard(text);
+                                  },
+                                  onImportAllToNotebook: () {
+                                    _importPdfPagesToNotebook(
+                                      _activePdfStudyDoc!,
+                                    );
+                                  },
+                                ),
+                              ),
+                          ],
                         ),
-                    ],
+                      );
+                    },
                   ),
-                );
-              },
+                ),
               ),
-            ),
+            ],
           ),
-          ],
-        ),
-      ), // Focus
+        ), // Focus
       ), // SafeArea
     );
   } // end build()
@@ -1462,7 +1860,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     if (_isTransitioning || !mounted) return;
     final currentIdx = widget.state.currentPageIndex;
     if (targetIndex == currentIdx) return;
-    if (targetIndex < 0 || targetIndex >= widget.state.canvasPages.length) return;
+    if (targetIndex < 0 || targetIndex >= widget.state.canvasPages.length) {
+      return;
+    }
 
     // 1. Synchronously commit any live drawing in-flight
     if (_currentStrokePoints.isNotEmpty) {
@@ -1511,13 +1911,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   void _springBack() {
     if (_sheetDragOffset == 0.0) return;
-    _springBackAnim = Tween<double>(
-      begin: _sheetDragOffset,
-      end: 0.0,
-    ).animate(CurvedAnimation(
-      parent: _springBackCtrl,
-      curve: Curves.easeOutCubic,
-    ));
+    _springBackAnim = Tween<double>(begin: _sheetDragOffset, end: 0.0).animate(
+      CurvedAnimation(parent: _springBackCtrl, curve: Curves.easeOutCubic),
+    );
     _springBackCtrl.forward(from: 0.0);
   }
 
@@ -1548,14 +1944,16 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   }
 
   Widget _buildPullToAddPageIndicator(bool isDark) {
-    final isLastPage = widget.state.currentPageIndex >= (widget.state.canvasPages.length - 1);
+    final isLastPage =
+        widget.state.currentPageIndex >= (widget.state.canvasPages.length - 1);
     final isPulling = _horizontalPullDistance > 5.0;
 
     if (!isLastPage && _sheetDragOffset >= -5.0) {
       return const SizedBox.shrink();
     }
 
-    final isTriggerReady = _isHoldingToAddPage || (_horizontalPullDistance >= 65.0 && !isLastPage);
+    final isTriggerReady =
+        _isHoldingToAddPage || (_horizontalPullDistance >= 65.0 && !isLastPage);
 
     return Positioned(
       right: 0,
@@ -1566,7 +1964,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           duration: const Duration(milliseconds: 100),
           curve: Curves.easeOutCubic,
           transform: Matrix4.translationValues(
-            isPulling ? math.max(0.0, 68.0 - _horizontalPullDistance * 0.85) : 60.0,
+            isPulling
+                ? math.max(0.0, 68.0 - _horizontalPullDistance * 0.85)
+                : 60.0,
             0.0,
             0.0,
           ),
@@ -1581,12 +1981,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       colors: [Color(0xFF2563EB), Color(0xFF1D4ED8)],
                     )
                   : (isDark
-                      ? const LinearGradient(colors: [Color(0xFF1E293B), Color(0xFF0F172A)])
-                      : const LinearGradient(colors: [Color(0xFFFFFFFF), Color(0xFFF1F5F9)])),
+                        ? const LinearGradient(
+                            colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
+                          )
+                        : const LinearGradient(
+                            colors: [Color(0xFFFFFFFF), Color(0xFFF1F5F9)],
+                          )),
               border: Border.all(
                 color: isTriggerReady
                     ? const Color(0xFF93C5FD)
-                    : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
+                    : (isDark
+                          ? const Color(0xFF334155)
+                          : const Color(0xFFCBD5E1)),
                 width: isTriggerReady ? 1.6 : 1.2,
               ),
               boxShadow: [
@@ -1608,8 +2014,11 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   child: CircularProgressIndicator(
                     value: isLastPage
                         ? (_isHoldingToAddPage
-                            ? _addPageHoldCtrl.value
-                            : (_horizontalPullDistance / 65.0).clamp(0.0, 0.95))
+                              ? _addPageHoldCtrl.value
+                              : (_horizontalPullDistance / 65.0).clamp(
+                                  0.0,
+                                  0.95,
+                                ))
                         : (_horizontalPullDistance / 60.0).clamp(0.0, 1.0),
                     strokeWidth: 2.6,
                     backgroundColor: isTriggerReady
@@ -1618,7 +2027,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     valueColor: AlwaysStoppedAnimation<Color>(
                       isTriggerReady
                           ? Colors.white
-                          : (isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB)),
+                          : (isDark
+                                ? const Color(0xFF60A5FA)
+                                : const Color(0xFF2563EB)),
                     ),
                   ),
                 ),
@@ -1666,17 +2077,29 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: isTriggerReady
-                  ? const LinearGradient(colors: [Color(0xFF2563EB), Color(0xFF1D4ED8)])
+                  ? const LinearGradient(
+                      colors: [Color(0xFF2563EB), Color(0xFF1D4ED8)],
+                    )
                   : (isDark
-                      ? const LinearGradient(colors: [Color(0xFF1E293B), Color(0xFF0F172A)])
-                      : const LinearGradient(colors: [Color(0xFFFFFFFF), Color(0xFFF1F5F9)])),
+                        ? const LinearGradient(
+                            colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
+                          )
+                        : const LinearGradient(
+                            colors: [Color(0xFFFFFFFF), Color(0xFFF1F5F9)],
+                          )),
               border: Border.all(
-                color: isTriggerReady ? const Color(0xFF93C5FD) : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
+                color: isTriggerReady
+                    ? const Color(0xFF93C5FD)
+                    : (isDark
+                          ? const Color(0xFF334155)
+                          : const Color(0xFFCBD5E1)),
                 width: isTriggerReady ? 1.6 : 1.2,
               ),
               boxShadow: [
                 BoxShadow(
-                  color: isTriggerReady ? const Color(0xFF2563EB).withValues(alpha: 0.40) : Colors.black.withValues(alpha: 0.12),
+                  color: isTriggerReady
+                      ? const Color(0xFF2563EB).withValues(alpha: 0.40)
+                      : Colors.black.withValues(alpha: 0.12),
                   blurRadius: isTriggerReady ? 16 : 8,
                   offset: const Offset(2, 3),
                 ),
@@ -1695,14 +2118,20 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                         ? Colors.white.withValues(alpha: 0.25)
                         : (isDark ? Colors.white12 : Colors.black12),
                     valueColor: AlwaysStoppedAnimation<Color>(
-                      isTriggerReady ? Colors.white : (isDark ? const Color(0xFF60A5FA) : const Color(0xFF2563EB)),
+                      isTriggerReady
+                          ? Colors.white
+                          : (isDark
+                                ? const Color(0xFF60A5FA)
+                                : const Color(0xFF2563EB)),
                     ),
                   ),
                 ),
                 Icon(
                   Icons.chevron_right_rounded,
                   size: 20,
-                  color: isTriggerReady ? Colors.white : (isDark ? Colors.white : const Color(0xFF1E3A5F)),
+                  color: isTriggerReady
+                      ? Colors.white
+                      : (isDark ? Colors.white : const Color(0xFF1E3A5F)),
                 ),
               ],
             ),
@@ -1714,8 +2143,14 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   Widget _buildBottomFloatingPageBar(bool isDark) {
     if (!widget.state.isPageViewMode) return const SizedBox.shrink();
-    if (_showPenOptionsDialog || _showLassoOptionsDialog) return const SizedBox.shrink();
-    final total = widget.state.canvasPages.isNotEmpty ? widget.state.canvasPages.length : 1;
+    if (_showPenOptionsDialog ||
+        _showLassoOptionsDialog ||
+        _showElementsPanel) {
+      return const SizedBox.shrink();
+    }
+    final total = widget.state.canvasPages.isNotEmpty
+        ? widget.state.canvasPages.length
+        : 1;
     final current = widget.state.currentPageIndex + 1;
     final canPrev = widget.state.currentPageIndex > 0;
     final canNext = widget.state.currentPageIndex < total - 1;
@@ -1729,12 +2164,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           right: 0,
           child: Center(
             child: Container(
-              padding: EdgeInsets.symmetric(horizontal: isMobile ? 4 : 6, vertical: isMobile ? 3 : 4),
+              padding: EdgeInsets.symmetric(
+                horizontal: isMobile ? 4 : 6,
+                vertical: isMobile ? 3 : 4,
+              ),
               decoration: BoxDecoration(
-                color: (isDark ? const Color(0xFF1E293B) : Colors.white).withValues(alpha: 0.94),
+                color: (isDark ? const Color(0xFF1E293B) : Colors.white)
+                    .withValues(alpha: 0.94),
                 borderRadius: BorderRadius.circular(22),
                 border: Border.all(
-                  color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                  color: isDark
+                      ? const Color(0xFF334155)
+                      : const Color(0xFFE2E8F0),
                   width: 1.0,
                 ),
                 boxShadow: [
@@ -1751,22 +2192,35 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   IconButton(
                     icon: const Icon(Icons.chevron_left_rounded, size: 20),
                     padding: EdgeInsets.zero,
-                    constraints: BoxConstraints(minWidth: isMobile ? 28 : 32, minHeight: isMobile ? 28 : 32),
-                    color: canPrev ? (isDark ? Colors.white : const Color(0xFF0F172A)) : Colors.grey.shade400,
+                    constraints: BoxConstraints(
+                      minWidth: isMobile ? 28 : 32,
+                      minHeight: isMobile ? 28 : 32,
+                    ),
+                    color: canPrev
+                        ? (isDark ? Colors.white : const Color(0xFF0F172A))
+                        : Colors.grey.shade400,
                     onPressed: canPrev ? _navigateToPrevPage : null,
                     tooltip: 'Previous Page',
                   ),
                   InkWell(
-                    onTap: () => setState(() => _showPageThumbnailsDrawer = !_showPageThumbnailsDrawer),
+                    onTap: () => setState(
+                      () => _showPageThumbnailsDrawer =
+                          !_showPageThumbnailsDrawer,
+                    ),
                     borderRadius: BorderRadius.circular(8),
                     child: Padding(
-                      padding: EdgeInsets.symmetric(horizontal: isMobile ? 5 : 8, vertical: 4),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isMobile ? 5 : 8,
+                        vertical: 4,
+                      ),
                       child: Text(
                         '$current / $total',
                         style: GoogleFonts.inter(
                           fontSize: isMobile ? 11.5 : 12.5,
                           fontWeight: FontWeight.w600,
-                          color: isDark ? Colors.white : const Color(0xFF0F172A),
+                          color: isDark
+                              ? Colors.white
+                              : const Color(0xFF0F172A),
                         ),
                       ),
                     ),
@@ -1774,8 +2228,13 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   IconButton(
                     icon: const Icon(Icons.chevron_right_rounded, size: 20),
                     padding: EdgeInsets.zero,
-                    constraints: BoxConstraints(minWidth: isMobile ? 28 : 32, minHeight: isMobile ? 28 : 32),
-                    color: canNext ? (isDark ? Colors.white : const Color(0xFF0F172A)) : Colors.grey.shade400,
+                    constraints: BoxConstraints(
+                      minWidth: isMobile ? 28 : 32,
+                      minHeight: isMobile ? 28 : 32,
+                    ),
+                    color: canNext
+                        ? (isDark ? Colors.white : const Color(0xFF0F172A))
+                        : Colors.grey.shade400,
                     onPressed: canNext ? _navigateToNextPage : null,
                     tooltip: 'Next Page',
                   ),
@@ -1788,7 +2247,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   IconButton(
                     icon: const Icon(Icons.add_rounded, size: 19),
                     padding: EdgeInsets.zero,
-                    constraints: BoxConstraints(minWidth: isMobile ? 28 : 32, minHeight: isMobile ? 28 : 32),
+                    constraints: BoxConstraints(
+                      minWidth: isMobile ? 28 : 32,
+                      minHeight: isMobile ? 28 : 32,
+                    ),
                     color: const Color(0xFF2563EB),
                     onPressed: _triggerAddPageFromSwipe,
                     tooltip: 'Add Page',
@@ -1805,8 +2267,13 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     IconButton(
                       icon: const Icon(Icons.remove_rounded, size: 16),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 26, minHeight: 28),
-                      color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                      constraints: const BoxConstraints(
+                        minWidth: 26,
+                        minHeight: 28,
+                      ),
+                      color: isDark
+                          ? AppColors.darkTextSecondary
+                          : AppColors.lightTextSecondary,
                       onPressed: () {
                         setState(() {
                           _zoomScale = (_zoomScale * 0.85).clamp(0.2, 5.0);
@@ -1823,13 +2290,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       },
                       borderRadius: BorderRadius.circular(6),
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 3,
+                          vertical: 4,
+                        ),
                         child: Text(
                           '${(_zoomScale * 100).round()}%',
                           style: GoogleFonts.inter(
                             fontSize: 10.5,
                             fontWeight: FontWeight.w700,
-                            color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                            color: isDark
+                                ? AppColors.darkTextPrimary
+                                : AppColors.lightTextPrimary,
                           ),
                         ),
                       ),
@@ -1837,8 +2309,13 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     IconButton(
                       icon: const Icon(Icons.add_rounded, size: 16),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 26, minHeight: 28),
-                      color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                      constraints: const BoxConstraints(
+                        minWidth: 26,
+                        minHeight: 28,
+                      ),
+                      color: isDark
+                          ? AppColors.darkTextSecondary
+                          : AppColors.lightTextSecondary,
                       onPressed: () {
                         setState(() {
                           _zoomScale = (_zoomScale * 1.15).clamp(0.2, 5.0);
@@ -1847,10 +2324,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       tooltip: 'Zoom In',
                     ),
                     IconButton(
-                      icon: const Icon(Icons.center_focus_strong_rounded, size: 15),
+                      icon: const Icon(
+                        Icons.center_focus_strong_rounded,
+                        size: 15,
+                      ),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 26, minHeight: 28),
-                      color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                      constraints: const BoxConstraints(
+                        minWidth: 26,
+                        minHeight: 28,
+                      ),
+                      color: isDark
+                          ? AppColors.darkTextSecondary
+                          : AppColors.lightTextSecondary,
                       onPressed: () {
                         setState(() {
                           _panOffset = Offset.zero;
@@ -1914,7 +2399,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   int? _getPageIndexAtScreenPos(Offset screenPos) {
     if (!widget.state.isPageViewMode) return widget.state.currentPageIndex;
     final worldPos = _screenToWorld(screenPos);
-    return _isWorldPosInsidePaper(worldPos) ? widget.state.currentPageIndex : null;
+    return _isWorldPosInsidePaper(worldPos)
+        ? widget.state.currentPageIndex
+        : null;
   }
 
   /// Returns true if [screenPos] is within the active paper sheet.
@@ -1946,10 +2433,14 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       return SystemMouseCursors.none;
     }
     if (widget.state.currentTool == CanvasTool.laser) {
-      if (widget.state.isPageViewMode && _lastHoverScreenPos != null && !_isScreenPosInsidePaper(_lastHoverScreenPos!)) {
+      if (widget.state.isPageViewMode &&
+          _lastHoverScreenPos != null &&
+          !_isScreenPosInsidePaper(_lastHoverScreenPos!)) {
         return SystemMouseCursors.basic;
       }
-      return (_isDrawing || _laserStrokes.isNotEmpty) ? SystemMouseCursors.none : SystemMouseCursors.precise;
+      return (_isDrawing || _laserStrokes.isNotEmpty)
+          ? SystemMouseCursors.none
+          : SystemMouseCursors.precise;
     }
     if (widget.state.currentTool == CanvasTool.text) {
       return SystemMouseCursors.text;
@@ -1965,43 +2456,15 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   //   • EMA pressure smoothing
   //   • Invariant focal-point zoom (50%–500%)
   // ──────────────────────────────────────────────────────────────────────────
-  
+
   double _clampPanDx(double targetDx, double currentZoom, Size? cs) {
-    if (cs == null) return targetDx;
-    final studyPanelWidth = (_isPdfStudyReaderOpen && _activePdfStudyDoc != null)
-        ? math.min(480.0, math.max(340.0, cs.width * 0.38))
-        : 0.0;
-    final availableWidth = math.max(300.0, cs.width - studyPanelWidth);
-    final centerDx = availableWidth / 2.0;
-    final halfPageW = (_kPageWidth / 2.0) * currentZoom;
-    if (halfPageW * 2 <= availableWidth - 40) {
-      return targetDx.clamp(centerDx - 80.0, centerDx + 80.0);
-    }
-    final minDx = availableWidth - halfPageW - 60.0;
-    final maxDx = halfPageW + 60.0;
-    final lower = minDx < maxDx ? minDx : maxDx;
-    final upper = minDx < maxDx ? maxDx : minDx;
-    return targetDx.clamp(lower, upper);
+    // Generous, unconstrained horizontal panning across infinite workspace
+    return targetDx.clamp(-40000.0, 40000.0);
   }
 
   double _clampPanDy(double targetDy, double currentZoom, Size? cs) {
-    if (cs == null) return targetDy;
-    
-    final scaledH = _kPageHeight * currentZoom;
-    final worldPageCenterY = _kPageTop + _kPageHeight / 2.0;
-    final centerDy = cs.height / 2.0 - worldPageCenterY * currentZoom;
-    
-    if (scaledH <= cs.height) {
-      // Paper fits vertically on screen; keep vertically centered with slight elastic wiggle
-      return targetDy.clamp(centerDy - 60.0, centerDy + 60.0);
-    } else {
-      // Paper is taller than screen; allow vertical panning across page height
-      final topPanDy = 24.0 - _kPageTop * currentZoom;
-      final bottomPanDy = cs.height - 24.0 - (_kPageTop + _kPageHeight) * currentZoom;
-      final lower = bottomPanDy < topPanDy ? bottomPanDy - 80.0 : topPanDy - 80.0;
-      final upper = bottomPanDy < topPanDy ? topPanDy + 80.0 : bottomPanDy + 80.0;
-      return targetDy.clamp(lower, upper);
-    }
+    // Generous, unconstrained vertical panning across multi-page notebooks
+    return targetDy.clamp(-120000.0, 120000.0);
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -2010,7 +2473,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       _commitInlineText();
     }
 
-    if (_showPenOptionsDialog || _showLassoOptionsDialog || _showElementsPanel) {
+    if (_showPenOptionsDialog ||
+        _showLassoOptionsDialog ||
+        _showElementsPanel) {
       setState(() {
         _showPenOptionsDialog = false;
         _showLassoOptionsDialog = false;
@@ -2018,24 +2483,41 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       });
     }
 
+    // Direct middle-mouse or secondary/right-mouse button drag pan across all tools
+    final isMousePan = event.kind == PointerDeviceKind.mouse &&
+        (event.buttons == kMiddleMouseButton || event.buttons == kSecondaryMouseButton);
+    if (isMousePan) {
+      setState(() {
+        _isPanning = true;
+      });
+      return;
+    }
+
     // ── GoodNotes Swipe & Pull-to-Add-Page (Isolated from Inking) ─────────────
     final csWidth = _canvasSize?.width ?? 800.0;
     final paperScreenLeft = (_kPageLeft * _zoomScale) + _panOffset.dx;
-    final paperScreenRight = ((_kPageLeft + _kPageWidth) * _zoomScale) + _panOffset.dx;
+    final paperScreenRight =
+        ((_kPageLeft + _kPageWidth) * _zoomScale) + _panOffset.dx;
 
     final isOutsidePaper = !_isScreenPosInsidePaper(event.localPosition);
-    final isRightEdgeZone = event.localPosition.dx >= (csWidth - 90.0) ||
-        (event.localPosition.dx >= paperScreenRight - 90.0 && event.localPosition.dx >= paperScreenLeft);
-    final isLeftEdgeZone = event.localPosition.dx <= 90.0 ||
-        (event.localPosition.dx <= paperScreenLeft + 90.0 && event.localPosition.dx <= paperScreenRight);
-    final isHandTool = widget.state.currentTool == CanvasTool.hand || _spacePressed;
+    final isRightEdgeZone =
+        event.localPosition.dx >= (csWidth - 90.0) ||
+        (event.localPosition.dx >= paperScreenRight - 90.0 &&
+            event.localPosition.dx >= paperScreenLeft);
+    final isLeftEdgeZone =
+        event.localPosition.dx <= 90.0 ||
+        (event.localPosition.dx <= paperScreenLeft + 90.0 &&
+            event.localPosition.dx <= paperScreenRight);
+    final isHandTool =
+        widget.state.currentTool == CanvasTool.hand || _spacePressed;
 
-    final isStylus = event.kind == PointerDeviceKind.stylus ||
-        event.kind == PointerDeviceKind.invertedStylus ||
-        _gestureManager.isPencilActive ||
-        (event.pressure > 0.0 && event.pressure != 0.5 && event.pressure != 1.0) ||
-        event.tilt > 0.0;
-    final isDrawingTool = widget.state.currentTool == CanvasTool.pen ||
+    // Device ownership comes from Flutter's pointer kind. Inferring a Pencil
+    // from pressure or tilt can misclassify touch input on WebKit.
+    final isStylus =
+        event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
+    final isDrawingTool =
+        widget.state.currentTool == CanvasTool.pen ||
         widget.state.currentTool == CanvasTool.pencil ||
         widget.state.currentTool == CanvasTool.highlighter ||
         widget.state.currentTool == CanvasTool.eraser ||
@@ -2044,7 +2526,11 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     // Stylus touches NEVER trigger page swipe — stylus is strictly for writing.
     // Drawing/erasing tools also have 100% priority over swipes to allow writing seamlessly.
     // Hand tool is for 2D canvas navigation and pinch-to-zoom — NEVER hijacked into horizontal page swiping!
-    final canTriggerSwipe = !isStylus && !isDrawingTool && !isHandTool && (isOutsidePaper || isRightEdgeZone || isLeftEdgeZone);
+    final canTriggerSwipe =
+        !isStylus &&
+        !isDrawingTool &&
+        !isHandTool &&
+        (isOutsidePaper || isRightEdgeZone || isLeftEdgeZone);
 
     if (widget.state.isPageViewMode && canTriggerSwipe) {
       _horizontalSwipeStartPos = event.localPosition;
@@ -2055,7 +2541,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
     // ── Laser Pointer: Priority #1 presentation tool ─────────────────────────
     if (widget.state.currentTool == CanvasTool.laser) {
-      if (widget.state.isPageViewMode && !_isScreenPosInsidePaper(event.localPosition)) {
+      if (widget.state.isPageViewMode &&
+          !_isScreenPosInsidePaper(event.localPosition)) {
         // Outside paper: do not activate laser pointer
         return;
       }
@@ -2083,6 +2570,91 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
     final worldPos = _screenToWorld(event.localPosition);
 
+    // ── Selected Image Corner Resize Handles & Drag ─────────────────────────
+    if (_selectedImageId != null) {
+      final selImg = _getSelectedImageItem();
+      if (selImg != null) {
+        final b = selImg.bounds;
+        final handleRadius = 26.0 / _zoomScale;
+        if ((worldPos - b.bottomRight).distance <= handleRadius) {
+          setState(() {
+            _isResizingImage = true;
+            _resizingImageCorner = 'br';
+            _resizingImageInitialBounds = b;
+            _resizingImageInitialAspect = b.width / math.max(1.0, b.height);
+          });
+          return;
+        } else if ((worldPos - b.bottomLeft).distance <= handleRadius) {
+          setState(() {
+            _isResizingImage = true;
+            _resizingImageCorner = 'bl';
+            _resizingImageInitialBounds = b;
+            _resizingImageInitialAspect = b.width / math.max(1.0, b.height);
+          });
+          return;
+        } else if ((worldPos - b.topRight).distance <= handleRadius) {
+          setState(() {
+            _isResizingImage = true;
+            _resizingImageCorner = 'tr';
+            _resizingImageInitialBounds = b;
+            _resizingImageInitialAspect = b.width / math.max(1.0, b.height);
+          });
+          return;
+        } else if ((worldPos - b.topLeft).distance <= handleRadius) {
+          setState(() {
+            _isResizingImage = true;
+            _resizingImageCorner = 'tl';
+            _resizingImageInitialBounds = b;
+            _resizingImageInitialAspect = b.width / math.max(1.0, b.height);
+          });
+          return;
+        } else if (b.contains(worldPos) &&
+            (!isDrawingTool ||
+                widget.state.currentTool == CanvasTool.image ||
+                widget.state.currentTool == CanvasTool.lasso ||
+                event.kind == PointerDeviceKind.mouse)) {
+          setState(() {
+            _draggedObjectId = selImg.id;
+            _lastDragWorldPos = worldPos;
+          });
+          return;
+        }
+      }
+    }
+
+    // Fast-path: When Pen, Pencil, Highlighter, Eraser, Brush, or Stylus is active,
+    // establish ownership and begin writing in O(1) immediately.
+    // Deselect any active text box or image without returning so the first pencil point is never dropped.
+    if (isDrawingTool || isStylus) {
+      if (_selectedImageId != null) {
+        _selectedImageId = null;
+      }
+      if (_selectedTextItemId != null) {
+        _selectedTextItemId = null;
+        _showTextFormatToolbar = false;
+      }
+      if (widget.state.isPageViewMode) {
+        final hitPageIdx = _getPageIndexAtScreenPos(event.localPosition);
+        if (hitPageIdx != null && hitPageIdx != widget.state.currentPageIndex) {
+          _lastKnownPageIndex = hitPageIdx;
+          widget.state.setCanvasPage(hitPageIdx);
+        }
+      }
+      _gestureManager.setPinchStartGeometry(_zoomScale, _panOffset);
+      if (widget.state.currentTool == CanvasTool.eraser) {
+        _eraserCursorPosNotifier.value = event.localPosition;
+        _isErasingActiveNotifier.value = true;
+      }
+      CanvasPerformanceProfiler.instance.markPointerDown();
+      _gestureManager.onPointerDown(
+        event,
+        widget.state.currentTool.name,
+        currentZoom: _zoomScale,
+        currentPan: _panOffset,
+      );
+      return;
+    }
+
     // 1. Study Tape tap-to-reveal: Tapping any tape strip flips mask state instantly
     for (final obj in widget.state.canvasObjects.reversed) {
       if (obj is CanvasTapeItem && obj.hits(worldPos)) {
@@ -2101,7 +2673,15 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       return;
     }
 
-    // 3. Text box interaction: Resize handles, move handle, double-tap to edit, tap to select/create
+    // Hand tool / space-bar pan
+    if (widget.state.currentTool == CanvasTool.hand || _spacePressed) {
+      setState(() {
+        _isPanning = true;
+      });
+      return;
+    }
+
+    // 3. Move/resize existing objects (Text box, Element, Sticker, Badge, Image, Shape)
     final now = DateTime.now().millisecondsSinceEpoch;
     final handleTouchRadius = 24.0 / _zoomScale;
 
@@ -2112,7 +2692,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         final bbox = selItem.getBoundingBox();
         final rightHandle = Offset(bbox.right, bbox.center.dy);
         final leftHandle = Offset(bbox.left, bbox.center.dy);
-        final topHandle = Offset(bbox.center.dx, bbox.top - (14.0 / _zoomScale));
+        final topHandle = Offset(
+          bbox.center.dx,
+          bbox.top - (14.0 / _zoomScale),
+        );
 
         if ((worldPos - rightHandle).distance <= handleTouchRadius) {
           setState(() {
@@ -2129,11 +2712,11 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           });
           return;
         } else if ((worldPos - topHandle).distance <= handleTouchRadius ||
-                   (bbox.inflate(6.0).contains(worldPos) &&
-                    (widget.state.currentTool == CanvasTool.text ||
-                     widget.state.currentTool == CanvasTool.lasso))) {
+            bbox.inflate(6.0).contains(worldPos)) {
           // Check for double tap to edit
-          final isDoubleTap = (_lastTappedTextId == selItem.id) && (now - _lastTextTapTimestamp < 380);
+          final isDoubleTap =
+              (_lastTappedTextId == selItem.id) &&
+              (now - _lastTextTapTimestamp < 380);
           _lastTappedTextId = selItem.id;
           _lastTextTapTimestamp = now;
           if (isDoubleTap) {
@@ -2143,45 +2726,85 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           }
           // Enable dragging immediately
           setState(() {
-            _draggedTextItemId = selItem.id;
+            _draggedObjectId = selItem.id;
+            _lastDragWorldPos = worldPos;
           });
           return;
         }
       }
     }
 
-    // Check if user tapped on any text box
-    CanvasTextItem? foundText;
+    // Check if user tapped on ANY canvas object to select or drag it
+    CanvasObjectItem? foundObj;
     for (final obj in widget.state.canvasObjects.reversed) {
-      if (obj is CanvasTextItem && obj.hits(worldPos, padding: 8.0)) {
-        foundText = obj;
+      if (obj.hits(worldPos, padding: 10.0)) {
+        foundObj = obj;
         break;
       }
     }
 
-    if (foundText != null) {
-      final textItem = foundText;
-      final isDoubleTap = (_lastTappedTextId == textItem.id) && (now - _lastTextTapTimestamp < 380);
-      _lastTappedTextId = textItem.id;
-      _lastTextTapTimestamp = now;
+    if (foundObj != null) {
+      final hit = foundObj;
+      if (hit is CanvasTextItem) {
+        final textItem = hit;
+        final isDoubleTap =
+            (_lastTappedTextId == textItem.id) &&
+            (now - _lastTextTapTimestamp < 380);
+        _lastTappedTextId = textItem.id;
+        _lastTextTapTimestamp = now;
 
-      if (isDoubleTap) {
-        final screenPos = _worldToScreen(textItem.position);
-        _startInlineTextEditing(screenPos, existingItem: textItem);
-        return;
-      }
+        if (isDoubleTap) {
+          final screenPos = _worldToScreen(textItem.position);
+          _startInlineTextEditing(screenPos, existingItem: textItem);
+          return;
+        }
 
-      if (widget.state.currentTool == CanvasTool.text ||
-          widget.state.currentTool == CanvasTool.lasso) {
         setState(() {
           _selectedTextItemId = textItem.id;
           _showTextFormatToolbar = true;
-          _draggedTextItemId = textItem.id;
+          _draggedObjectId = textItem.id;
+          _lastDragWorldPos = worldPos;
+        });
+        return;
+      } else if (hit is CanvasNoteCardItem) {
+        setState(() {
+          _selectedTextItemId = null;
+          _showTextFormatToolbar = false;
+          _draggedObjectId = hit.id;
+          _lastDragWorldPos = worldPos;
+        });
+        return;
+      } else if (hit is CanvasImageItem) {
+        setState(() {
+          _selectedTextItemId = null;
+          _showTextFormatToolbar = false;
+          _selectedImageId = hit.id;
+          _draggedObjectId = hit.id;
+          _lastDragWorldPos = worldPos;
+        });
+        return;
+      } else if (hit is CanvasShapeItem &&
+          widget.state.currentTool != CanvasTool.rectangle &&
+          widget.state.currentTool != CanvasTool.circle &&
+          widget.state.currentTool != CanvasTool.triangle &&
+          widget.state.currentTool != CanvasTool.line &&
+          widget.state.currentTool != CanvasTool.arrow &&
+          widget.state.currentTool != CanvasTool.star) {
+        setState(() {
+          _selectedTextItemId = null;
+          _showTextFormatToolbar = false;
+          _draggedObjectId = hit.id;
+          _lastDragWorldPos = worldPos;
         });
         return;
       }
     } else {
       _lastTappedTextId = null;
+      if (_selectedImageId != null) {
+        setState(() {
+          _selectedImageId = null;
+        });
+      }
       if (_selectedTextItemId != null) {
         setState(() {
           _selectedTextItemId = null;
@@ -2196,23 +2819,19 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       }
     }
 
-    // Mouse hand tool / space-bar pan:
-    // Mouse clicks with Hand tool or Spacebar pan immediately via _isPanning.
-    // Touch finger gestures always route to _gestureManager so 1 finger pans and 2 fingers pinch-to-zoom!
-    if (event.kind == PointerDeviceKind.mouse && (widget.state.currentTool == CanvasTool.hand || _spacePressed)) {
-      setState(() { _isPanning = true; });
-      return;
-    }
-
     // Lasso selection drag-to-move check (world space)
-    if (widget.state.currentTool == CanvasTool.lasso && widget.state.selectedCanvasObjects.isNotEmpty) {
+    if (widget.state.currentTool == CanvasTool.lasso &&
+        widget.state.selectedCanvasObjects.isNotEmpty) {
       final worldPos = _screenToWorld(event.localPosition);
       Rect? combinedBBox;
       for (final obj in widget.state.selectedCanvasObjects) {
         final box = obj.getBoundingBox();
-        combinedBBox = combinedBBox == null ? box : combinedBBox.expandToInclude(box);
+        combinedBBox = combinedBBox == null
+            ? box
+            : combinedBBox.expandToInclude(box);
       }
-      if (combinedBBox != null && combinedBBox.inflate(24.0).contains(worldPos)) {
+      if (combinedBBox != null &&
+          combinedBBox.inflate(24.0).contains(worldPos)) {
         setState(() {
           _isDraggingSelection = true;
           _lastSelectionDragPos = worldPos;
@@ -2229,7 +2848,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         if (obj is CanvasTextItem) {
           final bbox = obj.getBoundingBox();
           if (bbox.contains(worldPos)) {
-            setState(() { _draggedTextItemId = obj.id; });
+            setState(() {
+              _draggedTextItemId = obj.id;
+            });
             return;
           }
         }
@@ -2254,27 +2875,61 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     }
 
     // Delegate to gesture manager (handles palm rejection, Pencil priority, 2-finger check)
-    _gestureManager.onPointerDown(event, widget.state.currentTool.name, currentZoom: _zoomScale, currentPan: _panOffset);
+    _gestureManager.onPointerDown(
+      event,
+      widget.state.currentTool.name,
+      currentZoom: _zoomScale,
+      currentPan: _panOffset,
+    );
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    // Fast-path: In active drawing stroke, route directly to gesture manager in O(1)
+    if (_isDrawing) {
+      final worldPos = _screenToWorld(event.localPosition);
+      if (_lastPointerMovePos != null &&
+          (worldPos - _lastPointerMovePos!).distance > 5.0) {
+        _lastPointerMovePos = worldPos;
+      }
+      _lastHoverScreenPos = event.localPosition;
+      if (widget.state.currentTool == CanvasTool.eraser) {
+        _eraserCursorPosNotifier.value = event.localPosition;
+      }
+      _gestureManager.onPointerMove(
+        event,
+        currentZoom: _zoomScale,
+        currentPan: _panOffset,
+        currentTool: widget.state.currentTool.name,
+      );
+      return;
+    }
+
     // ── Track GoodNotes Pull / Swipe Between Pages ─────────────────────────
-    if (widget.state.isPageViewMode && _isSwipeGestureActive && _horizontalSwipePointerId == event.pointer && _horizontalSwipeStartPos != null) {
+    if (widget.state.isPageViewMode &&
+        _isSwipeGestureActive &&
+        _horizontalSwipePointerId == event.pointer &&
+        _horizontalSwipeStartPos != null) {
       final deltaX = event.localPosition.dx - _horizontalSwipeStartPos!.dx;
-      final isLastPage = widget.state.currentPageIndex >= (widget.state.canvasPages.length - 1);
+      final isLastPage =
+          widget.state.currentPageIndex >=
+          (widget.state.canvasPages.length - 1);
 
       if (deltaX < 0) {
         // Dragging left -> Pulling next page or pulling to add new page
         final pullDist = -deltaX;
         if (isLastPage) {
           // Rubber-band resistance curve like GoodNotes
-          final resisted = pullDist <= 60.0 ? pullDist : 60.0 + (pullDist - 60.0) * 0.45;
+          final resisted = pullDist <= 60.0
+              ? pullDist
+              : 60.0 + (pullDist - 60.0) * 0.45;
           _sheetDragOffset = -resisted.clamp(0.0, 140.0);
           _horizontalPullDistance = pullDist.clamp(0.0, 160.0);
 
           // GoodNotes: Slide and Hold logic to add a new page
           if (pullDist >= 65.0) {
-            if (!_isHoldingToAddPage && !_addPageHoldCtrl.isAnimating && _addPageHoldCtrl.value < 1.0) {
+            if (!_isHoldingToAddPage &&
+                !_addPageHoldCtrl.isAnimating &&
+                _addPageHoldCtrl.value < 1.0) {
               _isHoldingToAddPage = true;
               _addPageHoldCtrl.forward(from: 0.0);
             }
@@ -2361,11 +3016,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               tilt: pt.tilt,
               velocity: pt.velocity,
               timestamp: pt.timestamp,
+              isStylus: pt.isStylus,
             );
           }
           obj.invalidateCache();
         } else if (obj is CanvasShapeItem) {
           obj.bounds = obj.bounds.shift(delta);
+          if (obj.startPoint != null) {
+            obj.startPoint = obj.startPoint! + delta;
+          }
+          if (obj.endPoint != null) {
+            obj.endPoint = obj.endPoint! + delta;
+          }
         } else if (obj is CanvasTextItem) {
           obj.position += delta;
         } else if (obj is CanvasNoteCardItem) {
@@ -2376,44 +3038,103 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           obj.rect = obj.rect.shift(delta);
         }
       }
-      setState(() {});
+      widget.state.notifyCanvasObjects();
+      return;
+    }
+
+    // Image corner resize (live aspect-locked corner scaling)
+    if (_isResizingImage &&
+        _selectedImageId != null &&
+        _resizingImageInitialBounds != null) {
+      final selImg = _getSelectedImageItem();
+      if (selImg != null) {
+        final currentWorldPos = _screenToWorld(event.localPosition);
+        final init = _resizingImageInitialBounds!;
+        final aspect = _resizingImageInitialAspect > 0
+            ? _resizingImageInitialAspect
+            : 1.0;
+        Rect newBounds = init;
+        if (_resizingImageCorner == 'br') {
+          final newW = math.max(60.0, currentWorldPos.dx - init.left);
+          final newH = math.max(40.0, newW / aspect);
+          newBounds = Rect.fromLTWH(init.left, init.top, newW, newH);
+        } else if (_resizingImageCorner == 'bl') {
+          final newW = math.max(60.0, init.right - currentWorldPos.dx);
+          final newH = math.max(40.0, newW / aspect);
+          newBounds = Rect.fromLTWH(init.right - newW, init.top, newW, newH);
+        } else if (_resizingImageCorner == 'tr') {
+          final newW = math.max(60.0, currentWorldPos.dx - init.left);
+          final newH = math.max(40.0, newW / aspect);
+          newBounds = Rect.fromLTWH(init.left, init.bottom - newH, newW, newH);
+        } else if (_resizingImageCorner == 'tl') {
+          final newW = math.max(60.0, init.right - currentWorldPos.dx);
+          final newH = math.max(40.0, newW / aspect);
+          newBounds = Rect.fromLTWH(init.right - newW, init.bottom - newH, newW, newH);
+        }
+        widget.state.resizeCanvasImageItem(
+          selImg.id,
+          newBounds,
+          isLiveDrag: true,
+        );
+        setState(() {});
+      }
       return;
     }
 
     // Text item width resize (live width adjustment with text wrapping)
     if (_isResizingTextWidth && _resizingTextItemId != null) {
-      final idx = widget.state.canvasObjects.indexWhere((o) => o.id == _resizingTextItemId);
+      final idx = widget.state.canvasObjects.indexWhere(
+        (o) => o.id == _resizingTextItemId,
+      );
       if (idx != -1 && widget.state.canvasObjects[idx] is CanvasTextItem) {
         final item = widget.state.canvasObjects[idx] as CanvasTextItem;
         final currentW = item.boxWidth ?? item.getBoundingBox().width;
-        final deltaW = (event.delta.dx / _zoomScale) * (_resizeFromLeft ? -1.0 : 1.0);
+        final deltaW =
+            (event.delta.dx / _zoomScale) * (_resizeFromLeft ? -1.0 : 1.0);
         final newW = (currentW + deltaW).clamp(80.0, 2400.0);
         Offset newPos = item.position;
         if (_resizeFromLeft) {
-          newPos = Offset(item.position.dx + (event.delta.dx / _zoomScale), item.position.dy);
+          newPos = Offset(
+            item.position.dx + (event.delta.dx / _zoomScale),
+            item.position.dy,
+          );
         }
-        widget.state.updateCanvasTextItem(item.copyWith(
-          boxWidth: newW,
-          position: newPos,
-        ));
+        widget.state.updateCanvasTextItem(
+          item.copyWith(boxWidth: newW, position: newPos),
+        );
       }
       setState(() {});
       return;
     }
 
-    // Text item drag (bypasses gesture manager)
-    if (_draggedTextItemId != null) {
-      widget.state.moveCanvasTextItem(_draggedTextItemId!, event.delta / _zoomScale);
-      setState(() {});
+    // Object live drag (bypasses gesture manager, 60/120fps direct repaint)
+    if (_draggedObjectId != null && _lastDragWorldPos != null) {
+      final currentWorldPos = _screenToWorld(event.localPosition);
+      final delta = currentWorldPos - _lastDragWorldPos!;
+      _lastDragWorldPos = currentWorldPos;
+
+      widget.state.moveCanvasObject(
+        _draggedObjectId!,
+        delta,
+        isLiveDrag: true,
+      );
       return;
     }
 
-    // Mouse hand tool / space-bar pan
-    if (event.kind == PointerDeviceKind.mouse && (widget.state.currentTool == CanvasTool.hand || _spacePressed) && _isPanning) {
+    // Hand tool / space-bar / middle-mouse / right-mouse pan
+    if (_isPanning) {
       setState(() {
         if (widget.state.isPageViewMode) {
-          final dx = _clampPanDx(_panOffset.dx + event.delta.dx, _zoomScale, _canvasSize);
-          final dy = _clampPanDy(_panOffset.dy + event.delta.dy, _zoomScale, _canvasSize);
+          final dx = _clampPanDx(
+            _panOffset.dx + event.delta.dx,
+            _zoomScale,
+            _canvasSize,
+          );
+          final dy = _clampPanDy(
+            _panOffset.dy + event.delta.dy,
+            _zoomScale,
+            _canvasSize,
+          );
           _panOffset = Offset(dx, dy);
         } else {
           _panOffset += event.delta;
@@ -2425,9 +3146,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     // All other tools: delegate to gesture manager
     // Update last-move tracking for draw-and-hold shape recognition
     final worldPos = _screenToWorld(event.localPosition);
-    if (_lastPointerMovePos != null && (worldPos - _lastPointerMovePos!).distance > 5.0) {
+    if (_lastPointerMovePos != null &&
+        (worldPos - _lastPointerMovePos!).distance > 5.0) {
       _lastPointerMovePos = worldPos;
-      _lastPointerMoveTime = DateTime.now();
     }
 
     _lastHoverScreenPos = event.localPosition;
@@ -2444,10 +3165,26 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    // Fast-path: When drawing stroke concludes, route directly to gesture manager in O(1)
+    if (_isDrawing) {
+      _lastEraseWorldPos = null;
+      _isErasingActive = false;
+      _isErasingActiveNotifier.value = false;
+      _eraserCursorPosNotifier.value = null;
+      CanvasPerformanceProfiler.instance.markPointerUp();
+      _gestureManager.onPointerUp(event);
+      _isDrawing = false;
+      return;
+    }
+
     // ── Complete GoodNotes Page Swipe & Pull to Add Page ─────────────────────
     if (_horizontalSwipePointerId == event.pointer) {
-      final isLastPage = widget.state.currentPageIndex >= (widget.state.canvasPages.length - 1);
-      final deltaX = _horizontalSwipeStartPos != null ? (event.localPosition.dx - _horizontalSwipeStartPos!.dx) : 0.0;
+      final isLastPage =
+          widget.state.currentPageIndex >=
+          (widget.state.canvasPages.length - 1);
+      final deltaX = _horizontalSwipeStartPos != null
+          ? (event.localPosition.dx - _horizontalSwipeStartPos!.dx)
+          : 0.0;
 
       // Cancel any incomplete hold
       if (_isHoldingToAddPage) {
@@ -2508,7 +3245,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     }
 
     // Study Tape creation commit
-    if (_isDrawingTape && _tapeStartWorld != null && _tapeCurrentWorld != null) {
+    if (_isDrawingTape &&
+        _tapeStartWorld != null &&
+        _tapeCurrentWorld != null) {
       final left = math.min(_tapeStartWorld!.dx, _tapeCurrentWorld!.dx);
       final top = math.min(_tapeStartWorld!.dy, _tapeCurrentWorld!.dy);
       final width = (_tapeCurrentWorld!.dx - _tapeStartWorld!.dx).abs();
@@ -2542,6 +3281,17 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       return;
     }
 
+    // Image resize completion
+    if (_isResizingImage) {
+      setState(() {
+        _isResizingImage = false;
+        _resizingImageCorner = null;
+        _resizingImageInitialBounds = null;
+      });
+      widget.state.commitLiveCanvasChanges();
+      return;
+    }
+
     // Text item width resize completion
     if (_isResizingTextWidth) {
       setState(() {
@@ -2552,16 +3302,20 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       return;
     }
 
-    // Text item drag
-    if (_draggedTextItemId != null) {
-      setState(() { _draggedTextItemId = null; });
+    // Object drag completion (text, badge, stamp, sticker, image, shape)
+    if (_draggedObjectId != null || _draggedTextItemId != null) {
+      _draggedObjectId = null;
+      _draggedTextItemId = null;
+      _lastDragWorldPos = null;
       widget.state.commitLiveCanvasChanges();
       return;
     }
 
-    // Mouse hand tool pan completion
-    if (event.kind == PointerDeviceKind.mouse && _isPanning) {
-      setState(() { _isPanning = false; });
+    // Hand tool pan completion
+    if (_isPanning) {
+      setState(() {
+        _isPanning = false;
+      });
       return;
     }
 
@@ -2591,7 +3345,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         } else {
           widget.state.clearCanvasSelection();
         }
-        setState(() { _dragStart = null; _dragCurrent = null; });
+        setState(() {
+          _dragStart = null;
+          _dragCurrent = null;
+        });
       } else {
         widget.state.clearCanvasSelection();
       }
@@ -2601,12 +3358,17 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
     // Shape commit
     if (_dragStart != null && _dragCurrent != null) {
-      if (tool == CanvasTool.rectangle || tool == CanvasTool.circle || tool == CanvasTool.line || tool == CanvasTool.arrow) {
+      if (tool == CanvasTool.rectangle ||
+          tool == CanvasTool.circle ||
+          tool == CanvasTool.triangle ||
+          tool == CanvasTool.line ||
+          tool == CanvasTool.arrow) {
         final rect = Rect.fromPoints(_dragStart!, _dragCurrent!);
         final clampedRect = widget.state.isPageViewMode
             ? rect.intersect(_kPageRect)
             : rect;
-        if (!clampedRect.isEmpty && (clampedRect.width > 5 || clampedRect.height > 5)) {
+        if (!clampedRect.isEmpty &&
+            (clampedRect.width > 5 || clampedRect.height > 5)) {
           final shape = CanvasShapeItem(
             id: 'shape-${DateTime.now().microsecondsSinceEpoch}',
             shapeType: tool.name,
@@ -2619,7 +3381,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           widget.state.addCanvasObject(shape);
         }
       }
-      setState(() { _dragStart = null; _dragCurrent = null; });
+      setState(() {
+        _dragStart = null;
+        _dragCurrent = null;
+      });
       _gestureManager.onPointerUp(event);
       return;
     }
@@ -2694,7 +3459,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     final steps = totalMs ~/ stepMs;
     int step = 0;
 
-    _laserFadeTimer = Timer.periodic(const Duration(milliseconds: stepMs), (timer) {
+    _laserFadeTimer = Timer.periodic(const Duration(milliseconds: stepMs), (
+      timer,
+    ) {
       step++;
       if (step >= steps || !mounted) {
         timer.cancel();
@@ -2722,7 +3489,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   /// gently prune very old strokes so the screen doesn't accumulate indefinitely.
   void _startLaserMaxAgeTimer() {
     if (_laserMaxAgeTimer != null && _laserMaxAgeTimer!.isActive) return;
-    _laserMaxAgeTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+    _laserMaxAgeTimer = Timer.periodic(const Duration(milliseconds: 100), (
+      timer,
+    ) {
       if (!mounted) {
         timer.cancel();
         _laserMaxAgeTimer = null;
@@ -2740,7 +3509,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       // Only prune strokes if older than 12 seconds
       for (int s = _laserStrokes.length - 1; s >= 0; s--) {
         final stroke = _laserStrokes[s];
-        if (stroke.isNotEmpty && (now - stroke.first.timestamp > _laserMaxStrokeAgeMs)) {
+        if (stroke.isNotEmpty &&
+            (now - stroke.first.timestamp > _laserMaxStrokeAgeMs)) {
           _laserStrokes.removeAt(s);
           changed = true;
         }
@@ -2758,7 +3528,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     const stepMs = 16;
     final steps = totalMs ~/ stepMs;
     int step = 0;
-    _laserDotFadeTimer = Timer.periodic(const Duration(milliseconds: stepMs), (timer) {
+    _laserDotFadeTimer = Timer.periodic(const Duration(milliseconds: stepMs), (
+      timer,
+    ) {
       step++;
       if (step >= steps || !mounted) {
         timer.cancel();
@@ -2798,7 +3570,8 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     _lastHoverScreenPos = event.localPosition;
     _gestureManager.onPointerHover(event);
     if (widget.state.currentTool == CanvasTool.laser) {
-      if (widget.state.isPageViewMode && !_isScreenPosInsidePaper(event.localPosition)) {
+      if (widget.state.isPageViewMode &&
+          !_isScreenPosInsidePaper(event.localPosition)) {
         if (_activeLaserPoint != null) {
           setState(() {
             _activeLaserPoint = null;
@@ -2831,8 +3604,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     setState(() {
       // Trackpad pinch-to-zoom with invariant focal-point
       final newScale = (_trackpadStartScale * event.scale).clamp(0.20, 5.0);
-      final newPan = event.localPosition -
-          (_trackpadFocalPoint - _trackpadStartPan) * (newScale / _trackpadStartScale) +
+      final newPan =
+          event.localPosition -
+          (_trackpadFocalPoint - _trackpadStartPan) *
+              (newScale / _trackpadStartScale) +
           event.panDelta;
 
       _zoomScale = newScale;
@@ -2852,7 +3627,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   void _onPointerSignal(PointerSignalEvent event) {
     if (event is PointerScrollEvent) {
-      final isCtrl = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
+      final isCtrl =
+          HardwareKeyboard.instance.isControlPressed ||
+          HardwareKeyboard.instance.isMetaPressed;
       if (isCtrl) {
         final zoomDelta = -event.scrollDelta.dy * 0.0015;
         final oldScale = _zoomScale;
@@ -2870,39 +3647,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           }
         });
       } else {
-        // Trackpad horizontal scroll to flip or add page
-        final now = DateTime.now();
-        if (_lastTrackpadScrollTimestamp == null || now.difference(_lastTrackpadScrollTimestamp!).inMilliseconds > 350) {
-          _cumulativeTrackpadScrollDx = 0.0;
-        }
-        _lastTrackpadScrollTimestamp = now;
-        _cumulativeTrackpadScrollDx += event.scrollDelta.dx;
-
-        if (widget.state.isPageViewMode && _cumulativeTrackpadScrollDx > 35.0 && event.scrollDelta.dy.abs() < 25.0) {
-          if (_lastPageSwipeTriggerTime == null || now.difference(_lastPageSwipeTriggerTime!).inMilliseconds > 800) {
-            _lastPageSwipeTriggerTime = now;
-            _cumulativeTrackpadScrollDx = 0.0;
-            final isLastPage = widget.state.currentPageIndex >= (widget.state.canvasPages.length - 1);
-            if (isLastPage) {
-              _triggerAddPageFromSwipe();
-            } else {
-              _navigateToNextPage();
-            }
-          }
-        } else if (widget.state.isPageViewMode && _cumulativeTrackpadScrollDx < -35.0 && event.scrollDelta.dy.abs() < 25.0) {
-          if (_lastPageSwipeTriggerTime == null || now.difference(_lastPageSwipeTriggerTime!).inMilliseconds > 800) {
-            _lastPageSwipeTriggerTime = now;
-            _cumulativeTrackpadScrollDx = 0.0;
-            if (widget.state.currentPageIndex > 0) {
-              _navigateToPrevPage();
-            }
-          }
-        }
-
         setState(() {
           if (widget.state.isPageViewMode) {
-            final dx = _clampPanDx(_panOffset.dx - event.scrollDelta.dx, _zoomScale, _canvasSize);
-            final dy = _clampPanDy(_panOffset.dy - event.scrollDelta.dy, _zoomScale, _canvasSize);
+            final dx = _clampPanDx(
+              _panOffset.dx - event.scrollDelta.dx,
+              _zoomScale,
+              _canvasSize,
+            );
+            final dy = _clampPanDy(
+              _panOffset.dy - event.scrollDelta.dy,
+              _zoomScale,
+              _canvasSize,
+            );
             _panOffset = Offset(dx, dy);
             _updateActivePageFromScrollPosition();
           } else {
@@ -2969,8 +3725,13 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   // ── Inline Text Editing (GoodNotes-style) ────────────────────────────────────
 
-  void _startInlineTextEditing(Offset screenPos, {CanvasTextItem? existingItem}) {
-    if (existingItem == null && widget.state.isPageViewMode && !_isScreenPosInsidePaper(screenPos)) {
+  void _startInlineTextEditing(
+    Offset screenPos, {
+    CanvasTextItem? existingItem,
+  }) {
+    if (existingItem == null &&
+        widget.state.isPageViewMode &&
+        !_isScreenPosInsidePaper(screenPos)) {
       return; // Outside paper writing not allowed for new items
     }
     _editingExistingTextId = existingItem?.id;
@@ -2999,7 +3760,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     final text = _inlineTextCtrl.text.trim();
     if (text.isNotEmpty) {
       if (_editingExistingTextId != null) {
-        final idx = widget.state.canvasObjects.indexWhere((o) => o.id == _editingExistingTextId);
+        final idx = widget.state.canvasObjects.indexWhere(
+          (o) => o.id == _editingExistingTextId,
+        );
         if (idx != -1 && widget.state.canvasObjects[idx] is CanvasTextItem) {
           final existing = widget.state.canvasObjects[idx] as CanvasTextItem;
           final updated = existing.copyWith(text: text);
@@ -3025,7 +3788,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       }
     } else if (_editingExistingTextId != null) {
       // Empty text commits as delete in GoodNotes
-      final idx = widget.state.canvasObjects.indexWhere((o) => o.id == _editingExistingTextId);
+      final idx = widget.state.canvasObjects.indexWhere(
+        (o) => o.id == _editingExistingTextId,
+      );
       if (idx != -1) {
         widget.state.removeCanvasObject(widget.state.canvasObjects[idx]);
       }
@@ -3059,16 +3824,25 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     final isStrikethrough = existing?.isStrikethrough ?? false;
     final alignment = existing?.alignment ?? TextAlign.left;
     final textColor = existing?.color ?? widget.state.strokeColor;
-    final bgColor = existing?.backgroundColor ?? (isDark ? const Color(0xEE1E2436) : Colors.white);
+    final bgColor =
+        existing?.backgroundColor ??
+        (isDark ? const Color(0xEE1E2436) : Colors.white);
     final borderColor = existing?.borderColor ?? const Color(0xFF6366F1);
-    final borderWidth = existing?.borderColor != null ? (existing!.borderWidth > 0 ? existing.borderWidth : 1.5) : 1.5;
+    final borderWidth = existing?.borderColor != null
+        ? (existing!.borderWidth > 0 ? existing.borderWidth : 1.5)
+        : 1.5;
     final borderRadius = existing?.borderRadius ?? 8.0;
     final paddingVal = (existing?.padding ?? 10.0) * _zoomScale;
-    final boxWidth = existing?.boxWidth != null ? (existing!.boxWidth! * _zoomScale) : null;
+    final boxWidth = existing?.boxWidth != null
+        ? (existing!.boxWidth! * _zoomScale)
+        : null;
 
     TextDecoration decoration = TextDecoration.none;
     if (isUnderline && isStrikethrough) {
-      decoration = TextDecoration.combine([TextDecoration.underline, TextDecoration.lineThrough]);
+      decoration = TextDecoration.combine([
+        TextDecoration.underline,
+        TextDecoration.lineThrough,
+      ]);
     } else if (isUnderline) {
       decoration = TextDecoration.underline;
     } else if (isStrikethrough) {
@@ -3112,7 +3886,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               color: isDark ? const Color(0xFF1E2436) : Colors.white,
               borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color: isDark ? const Color(0xFF2E3852) : const Color(0xFFCBD5E1),
+                color: isDark
+                    ? const Color(0xFF2E3852)
+                    : const Color(0xFFCBD5E1),
                 width: 1,
               ),
               boxShadow: [
@@ -3126,7 +3902,11 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.edit_note_rounded, size: 16, color: Color(0xFF6366F1)),
+                const Icon(
+                  Icons.edit_note_rounded,
+                  size: 16,
+                  color: Color(0xFF6366F1),
+                ),
                 const SizedBox(width: 4),
                 Text(
                   fontFamily,
@@ -3139,17 +3919,28 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 const SizedBox(width: 4),
                 Text(
                   '${(existing?.fontSize ?? 18.0).toInt()}pt',
-                  style: const TextStyle(fontSize: 10.5, color: Color(0xFF6366F1), fontWeight: FontWeight.bold),
+                  style: const TextStyle(
+                    fontSize: 10.5,
+                    color: Color(0xFF6366F1),
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(width: 8),
-                Container(width: 1, height: 14, color: isDark ? Colors.white24 : Colors.black12),
+                Container(
+                  width: 1,
+                  height: 14,
+                  color: isDark ? Colors.white24 : Colors.black12,
+                ),
                 const SizedBox(width: 6),
                 // Commit Done Button
                 InkWell(
                   onTap: _commitInlineText,
                   borderRadius: BorderRadius.circular(10),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 3,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFF6366F1),
                       borderRadius: BorderRadius.circular(10),
@@ -3157,11 +3948,19 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     child: const Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.check_rounded, size: 14, color: Colors.white),
+                        Icon(
+                          Icons.check_rounded,
+                          size: 14,
+                          color: Colors.white,
+                        ),
                         SizedBox(width: 3),
                         Text(
                           'Done',
-                          style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ],
                     ),
@@ -3181,7 +3980,11 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   borderRadius: BorderRadius.circular(10),
                   child: Padding(
                     padding: const EdgeInsets.all(4),
-                    child: Icon(Icons.close_rounded, size: 14, color: isDark ? Colors.white60 : Colors.black54),
+                    child: Icon(
+                      Icons.close_rounded,
+                      size: 14,
+                      color: isDark ? Colors.white60 : Colors.black54,
+                    ),
                   ),
                 ),
               ],
@@ -3238,29 +4041,30 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     );
   }
 
-
   void _showNotebookPagesOverviewDialog(bool isDark) {
     showDialog(
       context: context,
-      builder: (ctx) => _NotebookPagesOverviewDialog(
-        state: widget.state,
-        isDark: isDark,
-      ),
+      builder: (ctx) =>
+          _NotebookPagesOverviewDialog(state: widget.state, isDark: isDark),
     );
   }
-
-
 
   Widget _buildTravelControls(bool isDark) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: isDark ? AppColors.darkSurfaceGlass : AppColors.lightSurfaceGlass,
+        color: isDark
+            ? AppColors.darkSurfaceGlass
+            : AppColors.lightSurfaceGlass,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: isDark ? AppColors.darkBorderAccent : AppColors.lightBorderAccent,
+          color: isDark
+              ? AppColors.darkBorderAccent
+              : AppColors.lightBorderAccent,
         ),
-        boxShadow: isDark ? AppColors.cardShadowDark : AppColors.cardShadowLight,
+        boxShadow: isDark
+            ? AppColors.cardShadowDark
+            : AppColors.cardShadowLight,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -3271,7 +4075,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             child: InkWell(
               onTap: () {
                 widget.state.setCanvasTool(
-                  widget.state.currentTool == CanvasTool.hand ? CanvasTool.pen : CanvasTool.hand,
+                  widget.state.currentTool == CanvasTool.hand
+                      ? CanvasTool.pen
+                      : CanvasTool.hand,
                 );
               },
               borderRadius: BorderRadius.circular(8),
@@ -3288,13 +4094,19 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   size: 16,
                   color: widget.state.currentTool == CanvasTool.hand
                       ? AppColors.primary
-                      : (isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary),
+                      : (isDark
+                            ? AppColors.darkTextSecondary
+                            : AppColors.lightTextSecondary),
                 ),
               ),
             ),
           ),
           const SizedBox(width: 4),
-          Container(width: 1, height: 16, color: isDark ? AppColors.darkBorder : AppColors.lightBorder),
+          Container(
+            width: 1,
+            height: 16,
+            color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+          ),
           const SizedBox(width: 4),
 
           // Zoom out [-]
@@ -3312,7 +4124,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 child: Icon(
                   Icons.remove_rounded,
                   size: 16,
-                  color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                  color: isDark
+                      ? AppColors.darkTextSecondary
+                      : AppColors.lightTextSecondary,
                 ),
               ),
             ),
@@ -3326,7 +4140,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               style: GoogleFonts.inter(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
-                color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                color: isDark
+                    ? AppColors.darkTextPrimary
+                    : AppColors.lightTextPrimary,
               ),
             ),
           ),
@@ -3346,14 +4162,20 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 child: Icon(
                   Icons.add_rounded,
                   size: 16,
-                  color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                  color: isDark
+                      ? AppColors.darkTextSecondary
+                      : AppColors.lightTextSecondary,
                 ),
               ),
             ),
           ),
 
           const SizedBox(width: 4),
-          Container(width: 1, height: 16, color: isDark ? AppColors.darkBorder : AppColors.lightBorder),
+          Container(
+            width: 1,
+            height: 16,
+            color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+          ),
           const SizedBox(width: 4),
 
           // Reset to Center / Home
@@ -3372,7 +4194,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 child: Icon(
                   Icons.center_focus_strong_rounded,
                   size: 16,
-                  color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                  color: isDark
+                      ? AppColors.darkTextSecondary
+                      : AppColors.lightTextSecondary,
                 ),
               ),
             ),
@@ -3381,9 +4205,6 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       ),
     );
   }
-
-
-
 
   String _getPaperStyleLabel(CanvasPaperStyle style) {
     switch (style) {
@@ -3404,10 +4225,21 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     }
   }
 
-
   void _openPenOptionsPopover(BuildContext context) {
     setState(() {
-      _showPenOptionsDialog = !_showPenOptionsDialog;
+      if (widget.state.currentTool == CanvasTool.lasso) {
+        _showLassoOptionsDialog = !_showLassoOptionsDialog;
+        if (_showLassoOptionsDialog) {
+          _showPenOptionsDialog = false;
+          _showElementsPanel = false;
+        }
+      } else {
+        _showPenOptionsDialog = !_showPenOptionsDialog;
+        if (_showPenOptionsDialog) {
+          _showLassoOptionsDialog = false;
+          _showElementsPanel = false;
+        }
+      }
     });
   }
 
@@ -3421,16 +4253,27 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           children: [
             const Icon(Icons.ios_share_rounded, color: AppColors.primary),
             const SizedBox(width: 8),
-            Text('Share & Export', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w700)),
+            Text(
+              'Share & Export',
+              style: GoogleFonts.inter(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.picture_as_pdf_outlined, color: Colors.redAccent),
+              leading: const Icon(
+                Icons.picture_as_pdf_outlined,
+                color: Colors.redAccent,
+              ),
               title: const Text('Export as PDF (.pdf)'),
-              subtitle: const Text('All notebook pages in formatted PDF document'),
+              subtitle: const Text(
+                'All notebook pages in formatted PDF document',
+              ),
               onTap: () async {
                 final messenger = ScaffoldMessenger.of(context);
                 Navigator.pop(ctx);
@@ -3445,7 +4288,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     messenger.showSnackBar(
                       SnackBar(
                         backgroundColor: const Color(0xFF10B981),
-                        content: Text('Notebook "${doc.name}" exported to PDF (.pdf) successfully!'),
+                        content: Text(
+                          'Notebook "${doc.name}" exported to PDF (.pdf) successfully!',
+                        ),
                       ),
                     );
                   } catch (e) {
@@ -3460,9 +4305,14 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               },
             ),
             ListTile(
-              leading: const Icon(Icons.description_outlined, color: Colors.blueAccent),
+              leading: const Icon(
+                Icons.description_outlined,
+                color: Colors.blueAccent,
+              ),
               title: const Text('Export as Word (.docx)'),
-              subtitle: const Text('Microsoft Word document with pages & notes'),
+              subtitle: const Text(
+                'Microsoft Word document with pages & notes',
+              ),
               onTap: () async {
                 final messenger = ScaffoldMessenger.of(context);
                 Navigator.pop(ctx);
@@ -3477,7 +4327,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     messenger.showSnackBar(
                       SnackBar(
                         backgroundColor: const Color(0xFF10B981),
-                        content: Text('Notebook "${doc.name}" exported to Word (.docx) successfully!'),
+                        content: Text(
+                          'Notebook "${doc.name}" exported to Word (.docx) successfully!',
+                        ),
                       ),
                     );
                   } catch (e) {
@@ -3494,7 +4346,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             ListTile(
               leading: const Icon(Icons.code_rounded, color: Colors.teal),
               title: const Text('Export as Markdown (.md)'),
-              subtitle: const Text('Structured markdown with note cards & pages'),
+              subtitle: const Text(
+                'Structured markdown with note cards & pages',
+              ),
               onTap: () async {
                 final messenger = ScaffoldMessenger.of(context);
                 Navigator.pop(ctx);
@@ -3509,7 +4363,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     messenger.showSnackBar(
                       SnackBar(
                         backgroundColor: const Color(0xFF10B981),
-                        content: Text('Notebook "${doc.name}" exported to Markdown (.md) successfully!'),
+                        content: Text(
+                          'Notebook "${doc.name}" exported to Markdown (.md) successfully!',
+                        ),
                       ),
                     );
                   } catch (e) {
@@ -3524,7 +4380,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               },
             ),
             ListTile(
-              leading: const Icon(Icons.image_outlined, color: Colors.blueAccent),
+              leading: const Icon(
+                Icons.image_outlined,
+                color: Colors.blueAccent,
+              ),
               title: const Text('Export Active Page as PNG'),
               subtitle: const Text('High fidelity lossless image'),
               onTap: () async {
@@ -3541,7 +4400,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     messenger.showSnackBar(
                       const SnackBar(
                         backgroundColor: Color(0xFF10B981),
-                        content: Text('Active page exported as PNG successfully!'),
+                        content: Text(
+                          'Active page exported as PNG successfully!',
+                        ),
                       ),
                     );
                   } catch (e) {
@@ -3561,9 +4422,16 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               subtitle: const Text('Share read/write access with teammates'),
               onTap: () {
                 Navigator.pop(ctx);
-                Clipboard.setData(ClipboardData(text: 'https://notes.workspace/doc/${widget.state.currentCanvasDoc?.id ?? "1"}'));
+                Clipboard.setData(
+                  ClipboardData(
+                    text:
+                        'https://notes.workspace/doc/${widget.state.currentCanvasDoc?.id ?? "1"}',
+                  ),
+                );
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Collaboration link copied to clipboard!')),
+                  const SnackBar(
+                    content: Text('Collaboration link copied to clipboard!'),
+                  ),
                 );
               },
             ),
@@ -3579,23 +4447,133 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     );
   }
 
+  String _formatPdfPageContent(PdfPageData pageData) {
+    if (pageData.rawContent != null && pageData.rawContent!.trim().isNotEmpty) {
+      return pageData.rawContent!.trim();
+    }
+    final buffer = StringBuffer();
+    buffer.writeln(pageData.sectionTitle);
+    buffer.writeln('');
+    buffer.writeln(pageData.summary);
+    if (pageData.bulletPoints.isNotEmpty) {
+      buffer.writeln('');
+      buffer.writeln('Key Points:');
+      for (final bp in pageData.bulletPoints) {
+        buffer.writeln('• $bp');
+      }
+    }
+    if (pageData.keyTakeaway.isNotEmpty) {
+      buffer.writeln('');
+      buffer.writeln('💡 Takeaway: ${pageData.keyTakeaway}');
+    }
+    return buffer.toString();
+  }
+
   Future<void> _pickAndInsertImage() async {
     try {
-      final picker = ImagePicker();
-      final XFile? file = await picker.pickImage(source: ImageSource.gallery);
-      if (file != null) {
-        final bytes = await file.readAsBytes();
-        final base64String = base64Encode(bytes);
-        final centerScreen = Offset(_canvasSize?.width ?? 600, _canvasSize?.height ?? 600) / 2;
-        final worldCenter = _screenToWorld(centerScreen);
+      Uint8List? bytes;
+      String? filePath;
 
+      // 1. Try FilePicker first - robust across Web, Windows Desktop and Mobile
+      try {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.image,
+          withData: true,
+        );
+        if (result != null && result.files.isNotEmpty) {
+          final file = result.files.first;
+          bytes = file.bytes;
+          filePath = file.path;
+        }
+      } catch (pickerErr) {
+        debugPrint('FilePicker image error: $pickerErr');
+      }
+
+      // 2. Fallback to ImagePicker if FilePicker had no result or failed
+      if (bytes == null) {
+        final picker = ImagePicker();
+        final XFile? file = await picker.pickImage(source: ImageSource.gallery);
+        if (file != null) {
+          bytes = await file.readAsBytes();
+          filePath = file.path;
+        }
+      }
+
+      if (bytes != null) {
+        // Downsample and decode directly to avoid massive texture memory & canvas lag
+        ui.Codec codec;
+        try {
+          codec = await ui.instantiateImageCodec(
+            bytes,
+            targetWidth: 1600, // Downscale ultra-high-res images cleanly
+          );
+        } catch (_) {
+          codec = await ui.instantiateImageCodec(bytes);
+        }
+        final frameInfo = await codec.getNextFrame();
+        final ui.Image decodedUiImage = frameInfo.image;
+        final double naturalW = decodedUiImage.width.toDouble();
+        final double naturalH = decodedUiImage.height.toDouble();
+        final double aspect = (naturalW > 0 && naturalH > 0)
+            ? (naturalW / naturalH)
+            : (4.0 / 3.0);
+
+        // Compress downsampled image to lightweight PNG bytes for persistence
+        String base64String;
+        try {
+          final byteData =
+              await decodedUiImage.toByteData(format: ui.ImageByteFormat.png);
+          if (byteData != null) {
+            base64String = base64Encode(byteData.buffer.asUint8List());
+          } else {
+            base64String = base64Encode(bytes);
+          }
+        } catch (_) {
+          base64String = base64Encode(bytes);
+        }
+
+        // Calculate proportional display size (standard GoodNotes initial width ~360)
+        double initialW = 360.0;
+        double initialH = initialW / aspect;
+        if (initialH > 500.0) {
+          initialH = 500.0;
+          initialW = initialH * aspect;
+        }
+
+        final centerScreen =
+            Offset(_canvasSize?.width ?? 600, _canvasSize?.height ?? 600) / 2;
+        Offset worldCenter = _screenToWorld(centerScreen);
+        if (widget.state.isPageViewMode) {
+          final clampedX = worldCenter.dx.clamp(
+            _kPageLeft + initialW / 2 + 20,
+            _kPageLeft + _kPageWidth - initialW / 2 - 20,
+          );
+          final clampedY = worldCenter.dy.clamp(
+            _kPageTop + initialH / 2 + 20,
+            _kPageTop + _kPageHeight - initialH / 2 - 20,
+          );
+          worldCenter = Offset(clampedX, clampedY);
+        }
+
+        final imageId = 'img-${DateTime.now().millisecondsSinceEpoch}';
         final imageItem = CanvasImageItem(
-          id: 'img-${DateTime.now().millisecondsSinceEpoch}',
-          bounds: Rect.fromLTWH(worldCenter.dx - 140, worldCenter.dy - 100, 280, 200),
-          localFilePath: file.path,
+          id: imageId,
+          bounds: Rect.fromCenter(
+            center: worldCenter,
+            width: initialW,
+            height: initialH,
+          ),
+          localFilePath: filePath,
           base64Data: base64String,
         );
+
+        // Pre-cache decoded ui.Image immediately so frame 0 has ZERO decode lag
+        _decodedImagesCache[imageId] = decodedUiImage;
+
         widget.state.addCanvasObject(imageItem);
+        setState(() {
+          _selectedImageId = imageId;
+        });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -3620,6 +4598,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       );
       if (result != null && result.files.isNotEmpty) {
         final file = result.files.first;
+        final Uint8List? bytes = file.bytes;
 
         if (!mounted) return;
         await showGoodNotesPdfImportDialog(
@@ -3627,7 +4606,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           state: widget.state,
           fileName: file.name,
           sizeBytes: file.size,
-          fileBytes: file.bytes,
+          fileBytes: bytes,
           onImportAsNotebookPages: (doc) {
             _importPdfPagesToNotebook(doc);
           },
@@ -3643,36 +4622,33 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
 
   void _importPdfPagesToNotebook(PdfDocumentData doc) {
     final existingPages = widget.state.canvasPages;
-    final isInitialBlankPage = existingPages.length == 1 && existingPages.first.objects.isEmpty;
+    final isInitialBlankPage =
+        existingPages.length == 1 && existingPages.first.objects.isEmpty;
 
     int startIdx = 0;
     if (isInitialBlankPage && doc.pages.isNotEmpty) {
       final p1 = doc.pages.first;
-      final buffer = StringBuffer();
-      buffer.writeln(p1.sectionTitle);
-      buffer.writeln('');
-      buffer.writeln(p1.summary);
-      buffer.writeln('');
-      buffer.writeln('Key Points:');
-      for (final bp in p1.bulletPoints) {
-        buffer.writeln('• $bp');
-      }
-      buffer.writeln('');
-      buffer.writeln('💡 Takeaway: ${p1.keyTakeaway}');
+      final textContent = _formatPdfPageContent(p1);
 
       final textItem = CanvasTextItem(
         id: 'pdf-text-${doc.id}-${p1.pageNumber}',
-        text: buffer.toString(),
+        text: textContent,
         position: const Offset(-370, 20),
-        color: widget.state.isDarkMode ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+        color: widget.state.isDarkMode
+            ? const Color(0xFFF1F5F9)
+            : const Color(0xFF0F172A),
         fontSize: 15.0,
         fontFamily: 'Inter',
         lineHeight: 1.55,
         boxWidth: 740.0,
         paperStyle: 'blank',
         padding: 20.0,
-        backgroundColor: widget.state.isDarkMode ? const Color(0xFF1E2436) : const Color(0xFFFAFBFC),
-        borderColor: widget.state.isDarkMode ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+        backgroundColor: widget.state.isDarkMode
+            ? const Color(0xFF1E2436)
+            : const Color(0xFFFAFBFC),
+        borderColor: widget.state.isDarkMode
+            ? const Color(0xFF334155)
+            : const Color(0xFFE2E8F0),
         borderWidth: 1.2,
         borderRadius: 14.0,
       );
@@ -3690,31 +4666,27 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       for (int i = 1; i < doc.pages.length; i++) {
         final pageData = doc.pages[i];
         final pageTitle = '${doc.title} (p.${pageData.pageNumber})';
-        final buf = StringBuffer();
-        buf.writeln(pageData.sectionTitle);
-        buf.writeln('');
-        buf.writeln(pageData.summary);
-        buf.writeln('');
-        buf.writeln('Key Points:');
-        for (final bp in pageData.bulletPoints) {
-          buf.writeln('• $bp');
-        }
-        buf.writeln('');
-        buf.writeln('💡 Takeaway: ${pageData.keyTakeaway}');
+        final itemText = _formatPdfPageContent(pageData);
 
         final item = CanvasTextItem(
           id: 'pdf-text-${doc.id}-${pageData.pageNumber}',
-          text: buf.toString(),
+          text: itemText,
           position: const Offset(-370, 20),
-          color: widget.state.isDarkMode ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+          color: widget.state.isDarkMode
+            ? const Color(0xFFF1F5F9)
+            : const Color(0xFF0F172A),
           fontSize: 15.0,
           fontFamily: 'Inter',
           lineHeight: 1.55,
           boxWidth: 740.0,
           paperStyle: 'blank',
           padding: 20.0,
-          backgroundColor: widget.state.isDarkMode ? const Color(0xFF1E2436) : const Color(0xFFFAFBFC),
-          borderColor: widget.state.isDarkMode ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+          backgroundColor: widget.state.isDarkMode
+              ? const Color(0xFF1E2436)
+              : const Color(0xFFFAFBFC),
+          borderColor: widget.state.isDarkMode
+              ? const Color(0xFF334155)
+              : const Color(0xFFE2E8F0),
           borderWidth: 1.2,
           borderRadius: 14.0,
         );
@@ -3733,31 +4705,27 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       for (int i = 0; i < doc.pages.length; i++) {
         final pageData = doc.pages[i];
         final pageTitle = '${doc.title} (p.${pageData.pageNumber})';
-        final buffer = StringBuffer();
-        buffer.writeln(pageData.sectionTitle);
-        buffer.writeln('');
-        buffer.writeln(pageData.summary);
-        buffer.writeln('');
-        buffer.writeln('Key Points:');
-        for (final bp in pageData.bulletPoints) {
-          buffer.writeln('• $bp');
-        }
-        buffer.writeln('');
-        buffer.writeln('💡 Takeaway: ${pageData.keyTakeaway}');
+        final bufferText = _formatPdfPageContent(pageData);
 
         final textItem = CanvasTextItem(
           id: 'pdf-text-${doc.id}-${pageData.pageNumber}',
-          text: buffer.toString(),
+          text: bufferText,
           position: const Offset(-370, 20),
-          color: widget.state.isDarkMode ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+          color: widget.state.isDarkMode
+              ? const Color(0xFFF1F5F9)
+              : const Color(0xFF0F172A),
           fontSize: 15.0,
           fontFamily: 'Inter',
           lineHeight: 1.55,
           boxWidth: 740.0,
           paperStyle: 'blank',
           padding: 20.0,
-          backgroundColor: widget.state.isDarkMode ? const Color(0xFF1E2436) : const Color(0xFFFAFBFC),
-          borderColor: widget.state.isDarkMode ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+          backgroundColor: widget.state.isDarkMode
+              ? const Color(0xFF1E2436)
+              : const Color(0xFFFAFBFC),
+          borderColor: widget.state.isDarkMode
+              ? const Color(0xFF334155)
+              : const Color(0xFFE2E8F0),
           borderWidth: 1.2,
           borderRadius: 14.0,
         );
@@ -3781,7 +4749,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Imported ${doc.totalPages} PDF pages into notebook for direct annotation!'),
+          content: Text(
+            'Imported ${doc.totalPages} PDF pages into notebook for direct annotation!',
+          ),
           backgroundColor: const Color(0xFF10B981),
           duration: const Duration(seconds: 3),
         ),
@@ -3790,10 +4760,24 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   }
 
   void _insertPdfStudyCardOnCanvas(PdfDocumentData doc) {
-    final studyPanelWidth = math.min(480.0, math.max(340.0, (_canvasSize?.width ?? 1000) * 0.38));
-    final visibleWidth = math.max(300.0, (_canvasSize?.width ?? 600) - studyPanelWidth);
-    final centerScreen = Offset(visibleWidth / 2, (_canvasSize?.height ?? 600) / 2);
-    final worldCenter = _screenToWorld(centerScreen);
+    final studyPanelWidth = math.min(
+      480.0,
+      math.max(340.0, (_canvasSize?.width ?? 1000) * 0.38),
+    );
+    final visibleWidth = math.max(
+      300.0,
+      (_canvasSize?.width ?? 600) - studyPanelWidth,
+    );
+    final centerScreen = Offset(
+      visibleWidth / 2,
+      (_canvasSize?.height ?? 600) / 2,
+    );
+    Offset worldCenter = _screenToWorld(centerScreen);
+    if (widget.state.isPageViewMode) {
+      final clampedX = worldCenter.dx.clamp(_kPageLeft + 190.0, _kPageLeft + _kPageWidth - 190.0);
+      final clampedY = worldCenter.dy.clamp(_kPageTop + 135.0, _kPageTop + _kPageHeight - 135.0);
+      worldCenter = Offset(clampedX, clampedY);
+    }
 
     final card = CanvasNoteCardItem(
       id: 'pdf-doc-${doc.id}',
@@ -3802,8 +4786,12 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       height: 250,
       title: '📄 ${doc.title}',
       content: 'PDF Document (${doc.formattedSize}, ${doc.totalPages} pages)',
-      backgroundColor: widget.state.isDarkMode ? const Color(0xFF161B2E) : const Color(0xFFF8FAFC),
-      textColor: widget.state.isDarkMode ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+      backgroundColor: widget.state.isDarkMode
+          ? const Color(0xFF161B2E)
+          : const Color(0xFFF8FAFC),
+      textColor: widget.state.isDarkMode
+          ? const Color(0xFFF1F5F9)
+          : const Color(0xFF0F172A),
     );
 
     widget.state.addCanvasObject(card);
@@ -3817,7 +4805,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Inserted PDF Card & Opened Split-Screen Study Reader: ${doc.title}'),
+          content: Text(
+            'Inserted PDF Card & Opened Split-Screen Study Reader: ${doc.title}',
+          ),
           backgroundColor: const Color(0xFF2563EB),
           duration: const Duration(seconds: 3),
         ),
@@ -3825,20 +4815,30 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     }
   }
 
-  void _insertPdfPageContentToNotebook(PdfDocumentData doc, int pageNumber, String text) {
+  void _insertPdfPageContentToNotebook(
+    PdfDocumentData doc,
+    int pageNumber,
+    String text,
+  ) {
     final textItem = CanvasTextItem(
       id: 'pdf-page-insert-${DateTime.now().millisecondsSinceEpoch}',
       text: text,
       position: const Offset(-370, 20),
-      color: widget.state.isDarkMode ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+      color: widget.state.isDarkMode
+          ? const Color(0xFFF1F5F9)
+          : const Color(0xFF0F172A),
       fontSize: 15.0,
       fontFamily: 'Inter',
       lineHeight: 1.55,
       boxWidth: 740.0,
       paperStyle: 'blank',
       padding: 20.0,
-      backgroundColor: widget.state.isDarkMode ? const Color(0xFF1E2436) : const Color(0xFFFAFBFC),
-      borderColor: widget.state.isDarkMode ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+      backgroundColor: widget.state.isDarkMode
+          ? const Color(0xFF1E2436)
+          : const Color(0xFFFAFBFC),
+      borderColor: widget.state.isDarkMode
+          ? const Color(0xFF334155)
+          : const Color(0xFFE2E8F0),
       borderWidth: 1.2,
       borderRadius: 14.0,
     );
@@ -3869,11 +4869,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   }
 
   void _addPdfExcerptNoteCard(String text) {
-    final studyPanelWidth = (_isPdfStudyReaderOpen && _activePdfStudyDoc != null)
+    final studyPanelWidth =
+        (_isPdfStudyReaderOpen && _activePdfStudyDoc != null)
         ? math.min(480.0, math.max(340.0, (_canvasSize?.width ?? 1000) * 0.38))
         : 0.0;
-    final visibleWidth = math.max(300.0, (_canvasSize?.width ?? 600) - studyPanelWidth);
-    final centerScreen = Offset(visibleWidth / 2, (_canvasSize?.height ?? 600) / 2);
+    final visibleWidth = math.max(
+      300.0,
+      (_canvasSize?.width ?? 600) - studyPanelWidth,
+    );
+    final centerScreen = Offset(
+      visibleWidth / 2,
+      (_canvasSize?.height ?? 600) / 2,
+    );
     final worldCenter = _screenToWorld(centerScreen);
 
     final noteCard = CanvasNoteCardItem(
@@ -3883,8 +4890,12 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       height: 180,
       title: '📌 Study Excerpt',
       content: text,
-      backgroundColor: widget.state.isDarkMode ? const Color(0xFF1E2436) : const Color(0xFFFEF3C7),
-      textColor: widget.state.isDarkMode ? const Color(0xFFF1F5F9) : const Color(0xFF78350F),
+      backgroundColor: widget.state.isDarkMode
+          ? const Color(0xFF1E2436)
+          : const Color(0xFFFEF3C7),
+      textColor: widget.state.isDarkMode
+          ? const Color(0xFFF1F5F9)
+          : const Color(0xFF78350F),
     );
 
     widget.state.addCanvasObject(noteCard);
@@ -3928,7 +4939,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     color: const Color(0xFF6366F1).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.photo_library_rounded, color: Color(0xFF6366F1)),
+                  child: const Icon(
+                    Icons.photo_library_rounded,
+                    color: Color(0xFF6366F1),
+                  ),
                 ),
                 title: Text(
                   'Insert Image / Photo',
@@ -3939,7 +4953,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 ),
                 subtitle: Text(
                   'Choose from device gallery or files',
-                  style: TextStyle(color: isDark ? Colors.white60 : Colors.black54),
+                  style: TextStyle(
+                    color: isDark ? Colors.white60 : Colors.black54,
+                  ),
                 ),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -3954,7 +4970,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     color: const Color(0xFFEF4444).withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.picture_as_pdf_rounded, color: Color(0xFFEF4444)),
+                  child: const Icon(
+                    Icons.picture_as_pdf_rounded,
+                    color: Color(0xFFEF4444),
+                  ),
                 ),
                 title: Text(
                   'Insert PDF Document',
@@ -3965,7 +4984,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 ),
                 subtitle: Text(
                   'Select a PDF file to study alongside your notes',
-                  style: TextStyle(color: isDark ? Colors.white60 : Colors.black54),
+                  style: TextStyle(
+                    color: isDark ? Colors.white60 : Colors.black54,
+                  ),
                 ),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -3980,8 +5001,14 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
   }
 
   void _onSelectCanvasElement(CanvasElementItemData item) {
-    final centerScreen = Offset(_canvasSize?.width ?? 600, _canvasSize?.height ?? 600) / 2;
-    final worldCenter = _screenToWorld(centerScreen);
+    final centerScreen =
+        Offset(_canvasSize?.width ?? 600, _canvasSize?.height ?? 600) / 2;
+    Offset worldCenter = _screenToWorld(centerScreen);
+    if (widget.state.isPageViewMode) {
+      final clampedX = worldCenter.dx.clamp(_kPageLeft + 50.0, _kPageLeft + _kPageWidth - 50.0);
+      final clampedY = worldCenter.dy.clamp(_kPageTop + 50.0, _kPageTop + _kPageHeight - 50.0);
+      worldCenter = Offset(clampedX, clampedY);
+    }
 
     if (item.type == ElementItemType.emoji) {
       final textItem = CanvasTextItem(
@@ -4011,7 +5038,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         bounds: Rect.fromLTWH(worldCenter.dx - 40, worldCenter.dy - 40, 80, 80),
         strokeColor: item.color ?? const Color(0xFFF59E0B),
         strokeWidth: 3.0,
-        fillColor: (item.color ?? const Color(0xFFF59E0B)).withValues(alpha: 0.15),
+        fillColor: (item.color ?? const Color(0xFFF59E0B)).withValues(
+          alpha: 0.15,
+        ),
       );
       widget.state.addCanvasObject(shapeItem);
     }
@@ -4031,7 +5060,13 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           children: [
             const Icon(Icons.auto_stories_rounded, color: AppColors.primary),
             const SizedBox(width: 8),
-            Text(widget.state.currentCanvasDoc?.name ?? 'Preparing', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w700)),
+            Text(
+              widget.state.currentCanvasDoc?.name ?? 'Preparing',
+              style: GoogleFonts.inter(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           ],
         ),
         content: Column(
@@ -4042,7 +5077,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               title: const Text('Rename Notebook'),
               onTap: () {
                 Navigator.pop(ctx);
-                final ctrl = TextEditingController(text: widget.state.currentCanvasDoc?.name ?? '');
+                final ctrl = TextEditingController(
+                  text: widget.state.currentCanvasDoc?.name ?? '',
+                );
                 showDialog(
                   context: context,
                   builder: (rCtx) => AlertDialog(
@@ -4050,10 +5087,15 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     content: TextField(
                       controller: ctrl,
                       autofocus: true,
-                      decoration: const InputDecoration(hintText: 'Notebook Title'),
+                      decoration: const InputDecoration(
+                        hintText: 'Notebook Title',
+                      ),
                     ),
                     actions: [
-                      TextButton(onPressed: () => Navigator.pop(rCtx), child: const Text('Cancel')),
+                      TextButton(
+                        onPressed: () => Navigator.pop(rCtx),
+                        child: const Text('Cancel'),
+                      ),
                       ElevatedButton(
                         onPressed: () {
                           final newName = ctrl.text.trim();
@@ -4072,26 +5114,45 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             ListTile(
               leading: Icon(
                 Icons.analytics_outlined,
-                color: _showDiagnosticHud ? AppColors.primary : (isDark ? Colors.white70 : Colors.black87),
+                color: _showDiagnosticHud
+                    ? AppColors.primary
+                    : (isDark ? Colors.white70 : Colors.black87),
               ),
               title: const Text('Apple Pencil Telemetry HUD'),
-              subtitle: Text(_showDiagnosticHud ? 'Showing real-time iPad input metrics' : 'Tap to enable diagnostic telemetry overlay'),
+              subtitle: Text(
+                _showDiagnosticHud
+                    ? 'Showing real-time iPad input metrics'
+                    : 'Tap to enable diagnostic telemetry overlay',
+              ),
               trailing: Switch(
                 value: _showDiagnosticHud,
                 activeThumbColor: AppColors.primary,
                 onChanged: (val) {
                   Navigator.pop(ctx);
-                  setState(() => _showDiagnosticHud = val);
+                  setState(() {
+                    _showDiagnosticHud = val;
+                    _gestureManager.enableTelemetry = val;
+                  });
                 },
               ),
               onTap: () {
                 Navigator.pop(ctx);
-                setState(() => _showDiagnosticHud = !_showDiagnosticHud);
+                setState(() {
+                  _showDiagnosticHud = !_showDiagnosticHud;
+                  _gestureManager.enableTelemetry = _showDiagnosticHud;
+                  CanvasPerformanceProfiler.instance.isEnabled = _showDiagnosticHud;
+                });
               },
             ),
             ListTile(
-              leading: const Icon(Icons.delete_sweep_outlined, color: Colors.redAccent),
-              title: const Text('Clear Active Page', style: TextStyle(color: Colors.redAccent)),
+              leading: const Icon(
+                Icons.delete_sweep_outlined,
+                color: Colors.redAccent,
+              ),
+              title: const Text(
+                'Clear Active Page',
+                style: TextStyle(color: Colors.redAccent),
+              ),
               onTap: () {
                 Navigator.pop(ctx);
                 widget.state.clearCanvas();
@@ -4143,7 +5204,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
         decoration: BoxDecoration(
           color: bg,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.primary.withValues(alpha: 0.5), width: 1.5),
+          border: Border.all(
+            color: AppColors.primary.withValues(alpha: 0.5),
+            width: 1.5,
+          ),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.25),
@@ -4158,24 +5222,47 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
           children: [
             Row(
               children: [
-                const Icon(Icons.edit_note_rounded, size: 16, color: AppColors.primary),
+                const Icon(
+                  Icons.edit_note_rounded,
+                  size: 16,
+                  color: AppColors.primary,
+                ),
                 const SizedBox(width: 6),
                 Text(
                   'Pencil Telemetry (HUD)',
-                  style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: textCol),
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: textCol,
+                  ),
                 ),
                 const Spacer(),
                 InkWell(
-                  onTap: () => setState(() => _showDiagnosticHud = false),
+                  onTap: () => setState(() {
+                    _showDiagnosticHud = false;
+                    _gestureManager.enableTelemetry = false;
+                  }),
                   child: const Icon(Icons.close, size: 15, color: Colors.grey),
                 ),
               ],
             ),
             const Divider(height: 12),
-            _telemetryRow('Device', t?.deviceKind.toUpperCase() ?? 'NONE', t?.deviceKind == 'stylus' ? Colors.greenAccent : textCol),
+            _telemetryRow(
+              'Device',
+              t?.deviceKind.toUpperCase() ?? 'NONE',
+              t?.deviceKind == 'stylus' ? Colors.greenAccent : textCol,
+            ),
             _telemetryRow('Pointer ID', '#${t?.pointerId ?? 0}', textCol),
-            _telemetryRow('Event', t?.eventType.toUpperCase() ?? 'IDLE', textCol),
-            _telemetryRow('Pressure', '${((t?.pressure ?? 0) * 100).toStringAsFixed(1)}%', textCol),
+            _telemetryRow(
+              'Event',
+              t?.eventType.toUpperCase() ?? 'IDLE',
+              textCol,
+            ),
+            _telemetryRow(
+              'Pressure',
+              '${((t?.pressure ?? 0) * 100).toStringAsFixed(1)}%',
+              textCol,
+            ),
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
@@ -4186,10 +5273,43 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               ),
             ),
             const SizedBox(height: 4),
-            _telemetryRow('Tilt', '${((t?.tilt ?? 0) * 57.2958).toStringAsFixed(1)}°', textCol),
+            _telemetryRow(
+              'Tilt',
+              '${((t?.tilt ?? 0) * 57.2958).toStringAsFixed(1)}°',
+              textCol,
+            ),
             _telemetryRow('Buttons', '${t?.buttons ?? 0}', textCol),
-            _telemetryRow('Screen X,Y', '${t?.screenPosition.dx.toStringAsFixed(0)}, ${t?.screenPosition.dy.toStringAsFixed(0)}', mutedCol),
-            _telemetryRow('World X,Y', '${t?.worldPosition.dx.toStringAsFixed(0)}, ${t?.worldPosition.dy.toStringAsFixed(0)}', mutedCol),
+            _telemetryRow(
+              'Screen X,Y',
+              '${t?.screenPosition.dx.toStringAsFixed(0)}, ${t?.screenPosition.dy.toStringAsFixed(0)}',
+              mutedCol,
+            ),
+            _telemetryRow(
+              'World X,Y',
+              '${t?.worldPosition.dx.toStringAsFixed(0)}, ${t?.worldPosition.dy.toStringAsFixed(0)}',
+              mutedCol,
+            ),
+            const Divider(height: 12),
+            _telemetryRow(
+              'Down->1st Paint',
+              '${CanvasPerformanceProfiler.instance.latestDownToFirstPaintMs.toStringAsFixed(1)} ms',
+              Colors.greenAccent,
+            ),
+            _telemetryRow(
+              'Move Repaint',
+              '${CanvasPerformanceProfiler.instance.latestMoveToPaintMs.toStringAsFixed(1)} ms',
+              Colors.greenAccent,
+            ),
+            _telemetryRow(
+              'A->B Gap (Lift)',
+              '${CanvasPerformanceProfiler.instance.latestUpToDownGapMs.toStringAsFixed(1)} ms',
+              Colors.orangeAccent,
+            ),
+            _telemetryRow(
+              'Strokes Done',
+              '#${CanvasPerformanceProfiler.instance.totalStrokesCompleted}',
+              textCol,
+            ),
           ],
         ),
       ),
@@ -4202,8 +5322,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: GoogleFonts.inter(fontSize: 10.5, color: Colors.grey)),
-          Text(value, style: GoogleFonts.jetBrainsMono(fontSize: 10.5, fontWeight: FontWeight.w700, color: valColor)),
+          Text(
+            label,
+            style: GoogleFonts.inter(fontSize: 10.5, color: Colors.grey),
+          ),
+          Text(
+            value,
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: valColor,
+            ),
+          ),
         ],
       ),
     );
@@ -4244,14 +5374,22 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.auto_stories_rounded, size: 20, color: AppColors.primary),
+                  const Icon(
+                    Icons.auto_stories_rounded,
+                    size: 20,
+                    color: AppColors.primary,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       '${widget.state.currentCanvasDoc?.name ?? "Notebook"} (${pages.length} Pages)',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: textPri),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: textPri,
+                      ),
                     ),
                   ),
                   IconButton(
@@ -4260,13 +5398,17 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     tooltip: 'All Pages Grid Overview',
                   ),
                   IconButton(
-                    icon: const Icon(Icons.download_for_offline_rounded, size: 18),
+                    icon: const Icon(
+                      Icons.download_for_offline_rounded,
+                      size: 18,
+                    ),
                     onPressed: () => _showImportChatDialog(isDark),
                     tooltip: 'Import AI Chat',
                   ),
                   IconButton(
                     icon: const Icon(Icons.close, size: 18),
-                    onPressed: () => setState(() => _showPageThumbnailsDrawer = false),
+                    onPressed: () =>
+                        setState(() => _showPageThumbnailsDrawer = false),
                     tooltip: 'Close Drawer',
                   ),
                 ],
@@ -4282,7 +5424,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   Expanded(
                     child: ElevatedButton.icon(
                       icon: const Icon(Icons.add, size: 16),
-                      label: const Text('Add Page', style: TextStyle(fontSize: 12)),
+                      label: const Text(
+                        'Add Page',
+                        style: TextStyle(fontSize: 12),
+                      ),
                       onPressed: () {
                         widget.state.addNewPage();
                         setState(() {});
@@ -4291,7 +5436,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                         backgroundColor: AppColors.primary,
                         foregroundColor: Colors.white,
                         padding: const EdgeInsets.symmetric(vertical: 8),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ),
                   ),
@@ -4337,7 +5484,12 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildThumbnailCard(CanvasPage page, int idx, bool isSelected, bool isDark) {
+  Widget _buildThumbnailCard(
+    CanvasPage page,
+    int idx,
+    bool isSelected,
+    bool isDark,
+  ) {
     final pages = widget.state.canvasPages;
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -4347,7 +5499,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             : (isDark ? const Color(0xFF1B2030) : Colors.white),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: isSelected ? AppColors.primary : (isDark ? const Color(0xFF2C354C) : const Color(0xFFE2E8F0)),
+          color: isSelected
+              ? AppColors.primary
+              : (isDark ? const Color(0xFF2C354C) : const Color(0xFFE2E8F0)),
           width: isSelected ? 2.0 : 1.0,
         ),
       ),
@@ -4368,7 +5522,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                 width: 48,
                 height: 64,
                 decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF12151F) : const Color(0xFFFFFDF8),
+                  color: isDark
+                      ? const Color(0xFF12151F)
+                      : const Color(0xFFFFFDF8),
                   borderRadius: BorderRadius.circular(4),
                   border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
                 ),
@@ -4394,20 +5550,29 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       overflow: TextOverflow.ellipsis,
                       style: GoogleFonts.inter(
                         fontSize: 13,
-                        fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                        fontWeight: isSelected
+                            ? FontWeight.w700
+                            : FontWeight.w500,
                         color: isDark ? Colors.white : Colors.black87,
                       ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       '${page.objects.length} elements • ${_getPaperStyleLabel(page.paperStyle)}',
-                      style: GoogleFonts.inter(fontSize: 11, color: Colors.grey),
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        color: Colors.grey,
+                      ),
                     ),
                   ],
                 ),
               ),
               if (isSelected)
-                const Icon(Icons.check_circle_rounded, size: 18, color: AppColors.primary),
+                const Icon(
+                  Icons.check_circle_rounded,
+                  size: 18,
+                  color: AppColors.primary,
+                ),
               if (pages.length > 1) ...[
                 const SizedBox(width: 4),
                 GestureDetector(
@@ -4421,7 +5586,11 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       color: Colors.redAccent.withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(6),
                     ),
-                    child: const Icon(Icons.delete_outline_rounded, size: 15, color: Colors.redAccent),
+                    child: const Icon(
+                      Icons.delete_outline_rounded,
+                      size: 15,
+                      color: Colors.redAccent,
+                    ),
                   ),
                 ),
               ],
@@ -4432,21 +5601,17 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
     );
   }
 
-
-
   void _showImportChatDialog(bool isDark) {
     showDialog(
       context: context,
-      builder: (ctx) => _ImportChatDialog(
-        state: widget.state,
-        isDark: isDark,
-      ),
+      builder: (ctx) => _ImportChatDialog(state: widget.state, isDark: isDark),
     );
   }
 
-
   Widget _buildInteractiveCanvasCard(CanvasNoteCardItem card, bool isDark) {
-    if (card.id.startsWith('pdf-doc-') || card.id.startsWith('pdf-card-') || card.title.contains('📄')) {
+    if (card.id.startsWith('pdf-doc-') ||
+        card.id.startsWith('pdf-card-') ||
+        card.title.contains('📄')) {
       return GoodNotesPdfCanvasCard(
         card: card,
         isDark: isDark,
@@ -4504,16 +5669,28 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onPanUpdate: (details) {
-                widget.state.moveCanvasCard(card.id, details.delta / _zoomScale);
+                widget.state.moveCanvasCard(
+                  card.id,
+                  details.delta / _zoomScale,
+                );
               },
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
-                  color: isDark ? const Color(0xFF22283C) : const Color(0xFFF1F5F9),
-                  borderRadius: const BorderRadius.vertical(top: Radius.circular(13)),
+                  color: isDark
+                      ? const Color(0xFF22283C)
+                      : const Color(0xFFF1F5F9),
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(13),
+                  ),
                   border: Border(
                     bottom: BorderSide(
-                      color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+                      color: isDark
+                          ? AppColors.darkBorder
+                          : AppColors.lightBorder,
                     ),
                   ),
                 ),
@@ -4521,10 +5698,18 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                   children: [
                     const MouseRegion(
                       cursor: SystemMouseCursors.grab,
-                      child: Icon(Icons.drag_indicator_rounded, size: 16, color: Colors.grey),
+                      child: Icon(
+                        Icons.drag_indicator_rounded,
+                        size: 16,
+                        color: Colors.grey,
+                      ),
                     ),
                     const SizedBox(width: 4),
-                    const Icon(Icons.auto_awesome, size: 14, color: AppColors.accent),
+                    const Icon(
+                      Icons.auto_awesome,
+                      size: 14,
+                      color: AppColors.accent,
+                    ),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
@@ -4534,7 +5719,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
-                          color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                          color: isDark
+                              ? AppColors.darkTextPrimary
+                              : AppColors.lightTextPrimary,
                         ),
                       ),
                     ),
@@ -4542,19 +5729,28 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       const SizedBox(
                         width: 13,
                         height: 13,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.accent),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppColors.accent,
+                        ),
                       ),
                       const SizedBox(width: 8),
                     ],
                     IconButton(
                       icon: const Icon(Icons.copy_rounded, size: 15),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                      constraints: const BoxConstraints(
+                        minWidth: 26,
+                        minHeight: 26,
+                      ),
                       tooltip: 'Copy Answer',
                       onPressed: () {
                         Clipboard.setData(ClipboardData(text: card.content));
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Copied AI answer to clipboard'), duration: Duration(seconds: 1)),
+                          const SnackBar(
+                            content: Text('Copied AI answer to clipboard'),
+                            duration: Duration(seconds: 1),
+                          ),
                         );
                       },
                     ),
@@ -4562,7 +5758,10 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                     IconButton(
                       icon: const Icon(Icons.close_rounded, size: 16),
                       padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                      constraints: const BoxConstraints(
+                        minWidth: 26,
+                        minHeight: 26,
+                      ),
                       tooltip: 'Remove Card',
                       onPressed: () => widget.state.removeCanvasCard(card.id),
                     ),
@@ -4581,21 +5780,29 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                           const SizedBox(
                             width: 24,
                             height: 24,
-                            child: CircularProgressIndicator(strokeWidth: 2.5, color: AppColors.accent),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: AppColors.accent,
+                            ),
                           ),
                           const SizedBox(height: 12),
                           Text(
                             'AI analyzing canvas drawing...',
                             style: TextStyle(
                               fontSize: 12,
-                              color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+                              color: isDark
+                                  ? AppColors.darkTextMuted
+                                  : AppColors.lightTextMuted,
                             ),
                           ),
                         ],
                       ),
                     )
                   : Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
                       child: Scrollbar(
                         thumbVisibility: true,
                         child: SingleChildScrollView(
@@ -4604,7 +5811,9 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                             style: TextStyle(
                               fontSize: 12.5,
                               height: 1.5,
-                              color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                              color: isDark
+                                  ? AppColors.darkTextPrimary
+                                  : AppColors.lightTextPrimary,
                             ),
                           ),
                         ),
@@ -4616,28 +5825,43 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF141721) : const Color(0xFFF8FAFC),
-                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(13)),
+                color: isDark
+                    ? const Color(0xFF141721)
+                    : const Color(0xFFF8FAFC),
+                borderRadius: const BorderRadius.vertical(
+                  bottom: Radius.circular(13),
+                ),
                 border: Border(
                   top: BorderSide(
-                    color: isDark ? AppColors.darkBorder.withValues(alpha: 0.5) : AppColors.lightBorder,
+                    color: isDark
+                        ? AppColors.darkBorder.withValues(alpha: 0.5)
+                        : AppColors.lightBorder,
                   ),
                 ),
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.layers_outlined, size: 12, color: AppColors.primary),
+                  const Icon(
+                    Icons.layers_outlined,
+                    size: 12,
+                    color: AppColors.primary,
+                  ),
                   const SizedBox(width: 4),
                   const Text(
                     'Canvas AI Card',
-                    style: TextStyle(fontSize: 10.5, color: AppColors.primary, fontWeight: FontWeight.w600),
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   const Spacer(),
                   InkWell(
                     onTap: () {
                       widget.state.askAIAndPlaceCardOnCanvas(
                         action: 'explain',
-                        customPrompt: 'Expand and drill deeper into this insight: ${card.title}',
+                        customPrompt:
+                            'Expand and drill deeper into this insight: ${card.title}',
                       );
                     },
                     borderRadius: BorderRadius.circular(4),
@@ -4645,11 +5869,19 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
                       padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                       child: Row(
                         children: [
-                          Icon(Icons.auto_awesome, size: 11, color: AppColors.accent),
+                          Icon(
+                            Icons.auto_awesome,
+                            size: 11,
+                            color: AppColors.accent,
+                          ),
                           SizedBox(width: 3),
                           Text(
                             'Expand',
-                            style: TextStyle(fontSize: 10.5, color: AppColors.accent, fontWeight: FontWeight.w700),
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              color: AppColors.accent,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ],
                       ),
@@ -4663,10 +5895,7 @@ class _CanvasScreenState extends State<CanvasScreen> with SingleTickerProviderSt
       ),
     );
   }
-
 }
-
-
 
 // ================= IMPORT AI CHAT DIALOG (GOODNOTES & IPAD STYLE) =================
 class _ImportChatDialog extends StatefulWidget {
@@ -4679,7 +5908,8 @@ class _ImportChatDialog extends StatefulWidget {
   State<_ImportChatDialog> createState() => _ImportChatDialogState();
 }
 
-class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerProviderStateMixin {
+class _ImportChatDialogState extends State<_ImportChatDialog>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final TextEditingController _pasteController = TextEditingController();
   String _selectedModel = 'ChatGPT';
@@ -4701,7 +5931,9 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
   Widget build(BuildContext context) {
     final isDark = widget.isDark;
     final surfaceColor = isDark ? const Color(0xFF1E2235) : Colors.white;
-    final borderColor = isDark ? const Color(0xFF2D354E) : const Color(0xFFE2E8F0);
+    final borderColor = isDark
+        ? const Color(0xFF2D354E)
+        : const Color(0xFFE2E8F0);
 
     return Dialog(
       backgroundColor: Colors.transparent,
@@ -4713,7 +5945,9 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
           color: surfaceColor,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: borderColor),
-          boxShadow: isDark ? AppColors.cardShadowDark : AppColors.cardShadowLight,
+          boxShadow: isDark
+              ? AppColors.cardShadowDark
+              : AppColors.cardShadowLight,
         ),
         child: Column(
           children: [
@@ -4733,7 +5967,11 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
                       ),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.download_for_offline_rounded, color: Colors.white, size: 18),
+                    child: const Icon(
+                      Icons.download_for_offline_rounded,
+                      color: Colors.white,
+                      size: 18,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -4745,7 +5983,9 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
                           style: GoogleFonts.inter(
                             fontSize: 16,
                             fontWeight: FontWeight.w700,
-                            color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                            color: isDark
+                                ? AppColors.darkTextPrimary
+                                : AppColors.lightTextPrimary,
                           ),
                         ),
                         const SizedBox(height: 2),
@@ -4753,7 +5993,9 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
                           'Render your chat transcript into iPad GoodNotes digital notebook pages',
                           style: GoogleFonts.inter(
                             fontSize: 12,
-                            color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+                            color: isDark
+                                ? AppColors.darkTextMuted
+                                : AppColors.lightTextMuted,
                           ),
                         ),
                       ],
@@ -4771,20 +6013,39 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
             Container(
               decoration: BoxDecoration(
                 border: Border(bottom: BorderSide(color: borderColor)),
-                color: isDark ? const Color(0xFF181C2B) : const Color(0xFFF8FAFC),
+                color: isDark
+                    ? const Color(0xFF181C2B)
+                    : const Color(0xFFF8FAFC),
               ),
               child: TabBar(
                 controller: _tabController,
                 indicatorColor: AppColors.primary,
                 indicatorWeight: 3,
                 labelColor: AppColors.primary,
-                unselectedLabelColor: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
-                labelStyle: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700),
-                unselectedLabelStyle: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500),
+                unselectedLabelColor: isDark
+                    ? AppColors.darkTextMuted
+                    : AppColors.lightTextMuted,
+                labelStyle: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+                unselectedLabelStyle: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
                 tabs: const [
-                  Tab(icon: Icon(Icons.content_paste_rounded, size: 16), text: 'Paste Chat'),
-                  Tab(icon: Icon(Icons.auto_awesome_motion_rounded, size: 16), text: '1-Click Sample Threads'),
-                  Tab(icon: Icon(Icons.file_present_rounded, size: 16), text: 'JSON / File Guide'),
+                  Tab(
+                    icon: Icon(Icons.content_paste_rounded, size: 16),
+                    text: 'Paste Chat',
+                  ),
+                  Tab(
+                    icon: Icon(Icons.auto_awesome_motion_rounded, size: 16),
+                    text: '1-Click Sample Threads',
+                  ),
+                  Tab(
+                    icon: Icon(Icons.file_present_rounded, size: 16),
+                    text: 'JSON / File Guide',
+                  ),
                 ],
               ),
             ),
@@ -4819,7 +6080,9 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
                 style: GoogleFonts.inter(
                   fontSize: 12.5,
                   fontWeight: FontWeight.w600,
-                  color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                  color: isDark
+                      ? AppColors.darkTextPrimary
+                      : AppColors.lightTextPrimary,
                 ),
               ),
               const SizedBox(width: 12),
@@ -4837,7 +6100,9 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
             'Paste your conversation (Supports "User: ... \\n Assistant: ..." or raw copied AI responses):',
             style: GoogleFonts.inter(
               fontSize: 12,
-              color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+              color: isDark
+                  ? AppColors.darkTextMuted
+                  : AppColors.lightTextMuted,
             ),
           ),
           const SizedBox(height: 8),
@@ -4848,20 +6113,29 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
               expands: true,
               style: GoogleFonts.firaCode(
                 fontSize: 12.5,
-                color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                color: isDark
+                    ? AppColors.darkTextPrimary
+                    : AppColors.lightTextPrimary,
               ),
               decoration: InputDecoration(
-                hintText: 'User: How does quantum superposition work in quantum algorithms?\n\nChatGPT: Quantum superposition is a fundamental principle of quantum mechanics where a quantum system can exist in a linear combination of multiple states simultaneously until a measurement is made...',
+                hintText:
+                    'User: How does quantum superposition work in quantum algorithms?\n\nChatGPT: Quantum superposition is a fundamental principle of quantum mechanics where a quantum system can exist in a linear combination of multiple states simultaneously until a measurement is made...',
                 hintStyle: GoogleFonts.inter(
                   fontSize: 12,
-                  color: isDark ? AppColors.darkTextMuted.withValues(alpha: 0.6) : AppColors.lightTextMuted.withValues(alpha: 0.6),
+                  color: isDark
+                      ? AppColors.darkTextMuted.withValues(alpha: 0.6)
+                      : AppColors.lightTextMuted.withValues(alpha: 0.6),
                 ),
                 filled: true,
-                fillColor: isDark ? const Color(0xFF141722) : const Color(0xFFF1F5F9),
+                fillColor: isDark
+                    ? const Color(0xFF141722)
+                    : const Color(0xFFF1F5F9),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide(
-                    color: isDark ? const Color(0xFF2D354E) : const Color(0xFFE2E8F0),
+                    color: isDark
+                        ? const Color(0xFF2D354E)
+                        : const Color(0xFFE2E8F0),
                   ),
                 ),
                 contentPadding: const EdgeInsets.all(14),
@@ -4881,11 +6155,16 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
                 onPressed: () {
                   final text = _pasteController.text.trim();
                   if (text.isEmpty) return;
-                  widget.state.importChatThreadToCanvas(text, modelName: _selectedModel);
+                  widget.state.importChatThreadToCanvas(
+                    text,
+                    modelName: _selectedModel,
+                  );
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
-                      content: Text('✨ Imported conversation onto Canvas as $_selectedModel notebook cards!'),
+                      content: Text(
+                        '✨ Imported conversation onto Canvas as $_selectedModel notebook cards!',
+                      ),
                       duration: const Duration(seconds: 2),
                     ),
                   );
@@ -4895,8 +6174,13 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ],
@@ -4914,10 +6198,16 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          color: isSelected ? brandColor.withValues(alpha: 0.18) : Colors.transparent,
+          color: isSelected
+              ? brandColor.withValues(alpha: 0.18)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: isSelected ? brandColor : (widget.isDark ? AppColors.darkBorder : AppColors.lightBorder),
+            color: isSelected
+                ? brandColor
+                : (widget.isDark
+                      ? AppColors.darkBorder
+                      : AppColors.lightBorder),
             width: isSelected ? 1.5 : 1,
           ),
         ),
@@ -4927,7 +6217,10 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
             Container(
               width: 8,
               height: 8,
-              decoration: BoxDecoration(color: brandColor, shape: BoxShape.circle),
+              decoration: BoxDecoration(
+                color: brandColor,
+                shape: BoxShape.circle,
+              ),
             ),
             const SizedBox(width: 6),
             Text(
@@ -4935,7 +6228,11 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                color: isSelected ? brandColor : (widget.isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary),
+                color: isSelected
+                    ? brandColor
+                    : (widget.isDark
+                          ? AppColors.darkTextSecondary
+                          : AppColors.lightTextSecondary),
               ),
             ),
           ],
@@ -4951,8 +6248,10 @@ class _ImportChatDialogState extends State<_ImportChatDialog> with SingleTickerP
         'model': 'ChatGPT',
         'color': const Color(0xFF10B981),
         'icon': '⚛️',
-        'prompt': 'Explain quantum superposition and how qubits differ from classical bits.',
-        'content': '''User: Explain quantum superposition and how qubits differ from classical bits.
+        'prompt':
+            'Explain quantum superposition and how qubits differ from classical bits.',
+        'content':
+            '''User: Explain quantum superposition and how qubits differ from classical bits.
 
 ChatGPT: Quantum superposition is a foundational principle of quantum physics where a qubit exists in a linear superposition of basic states:
 |ψ⟩ = α|0⟩ + β|1⟩, where |α|² + |β|² = 1.
@@ -4967,8 +6266,10 @@ Key Differences:
         'model': 'Claude',
         'color': const Color(0xFF8B5CF6),
         'icon': '🏗️',
-        'prompt': 'When should an engineering team switch from a modular monolith to event-driven microservices?',
-        'content': '''User: When should an engineering team switch from a modular monolith to event-driven microservices?
+        'prompt':
+            'When should an engineering team switch from a modular monolith to event-driven microservices?',
+        'content':
+            '''User: When should an engineering team switch from a modular monolith to event-driven microservices?
 
 Claude: The decision to adopt microservices is primarily an organizational scaling decision rather than a purely technical one.
 
@@ -4986,8 +6287,10 @@ Rule of Thumb: Build clean in-process module boundaries first before breaking ne
         'model': 'Gemini',
         'color': const Color(0xFF3B82F6),
         'icon': '🧠',
-        'prompt': 'Explain Multi-Head Self-Attention with Query, Key, and Value matrices.',
-        'content': '''User: Explain Multi-Head Self-Attention with Query, Key, and Value matrices.
+        'prompt':
+            'Explain Multi-Head Self-Attention with Query, Key, and Value matrices.',
+        'content':
+            '''User: Explain Multi-Head Self-Attention with Query, Key, and Value matrices.
 
 Gemini: Self-Attention allows language models to dynamically assign attention weights across all tokens in a sequence regardless of distance.
 
@@ -5050,12 +6353,17 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
                           style: GoogleFonts.inter(
                             fontSize: 14,
                             fontWeight: FontWeight.w700,
-                            color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                            color: isDark
+                                ? AppColors.darkTextPrimary
+                                : AppColors.lightTextPrimary,
                           ),
                         ),
                         const SizedBox(width: 8),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
                           decoration: BoxDecoration(
                             color: brandColor.withValues(alpha: 0.16),
                             borderRadius: BorderRadius.circular(6),
@@ -5079,7 +6387,9 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
                       style: GoogleFonts.inter(
                         fontSize: 12,
                         fontStyle: FontStyle.italic,
-                        color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                        color: isDark
+                            ? AppColors.darkTextSecondary
+                            : AppColors.lightTextSecondary,
                       ),
                     ),
                   ],
@@ -5095,7 +6405,9 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
-                      content: Text('✨ Loaded "${sample['title']}" onto Canvas as GoodNotes notebook cards!'),
+                      content: Text(
+                        '✨ Loaded "${sample['title']}" onto Canvas as GoodNotes notebook cards!',
+                      ),
                       duration: const Duration(seconds: 2),
                     ),
                   );
@@ -5105,8 +6417,13 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
                 style: ElevatedButton.styleFrom(
                   backgroundColor: brandColor,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(9),
+                  ),
                 ),
               ),
             ],
@@ -5138,7 +6455,9 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
             style: GoogleFonts.inter(
               fontSize: 14,
               fontWeight: FontWeight.w700,
-              color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+              color: isDark
+                  ? AppColors.darkTextPrimary
+                  : AppColors.lightTextPrimary,
             ),
           ),
           const SizedBox(height: 8),
@@ -5149,7 +6468,9 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
             style: GoogleFonts.inter(
               fontSize: 12.5,
               height: 1.5,
-              color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+              color: isDark
+                  ? AppColors.darkTextSecondary
+                  : AppColors.lightTextSecondary,
             ),
           ),
           const SizedBox(height: 12),
@@ -5157,10 +6478,14 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF141722) : const Color(0xFFF1F5F9),
+                color: isDark
+                    ? const Color(0xFF141722)
+                    : const Color(0xFFF1F5F9),
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
-                  color: isDark ? const Color(0xFF2D354E) : const Color(0xFFE2E8F0),
+                  color: isDark
+                      ? const Color(0xFF2D354E)
+                      : const Color(0xFFE2E8F0),
                 ),
               ),
               child: SingleChildScrollView(
@@ -5168,7 +6493,9 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
                   sampleJson,
                   style: GoogleFonts.firaCode(
                     fontSize: 12,
-                    color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                    color: isDark
+                        ? AppColors.darkTextPrimary
+                        : AppColors.lightTextPrimary,
                   ),
                 ),
               ),
@@ -5180,11 +6507,16 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
             children: [
               ElevatedButton.icon(
                 onPressed: () {
-                  widget.state.importChatThreadToCanvas(sampleJson, modelName: 'ChatGPT');
+                  widget.state.importChatThreadToCanvas(
+                    sampleJson,
+                    modelName: 'ChatGPT',
+                  );
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content: Text('✨ Loaded JSON conversation onto canvas as notebook cards!'),
+                      content: Text(
+                        '✨ Loaded JSON conversation onto canvas as notebook cards!',
+                      ),
                       duration: Duration(seconds: 2),
                     ),
                   );
@@ -5194,8 +6526,13 @@ Multi-Head Attention projects Q, K, V across h subspace heads, empowering the mo
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 11,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ],
@@ -5217,17 +6554,22 @@ class _NotebookPagesOverviewDialog extends StatefulWidget {
   });
 
   @override
-  State<_NotebookPagesOverviewDialog> createState() => _NotebookPagesOverviewDialogState();
+  State<_NotebookPagesOverviewDialog> createState() =>
+      _NotebookPagesOverviewDialogState();
 }
 
-class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDialog> {
+class _NotebookPagesOverviewDialogState
+    extends State<_NotebookPagesOverviewDialog> {
   void _promptRenamePage(BuildContext context, int index, String currentTitle) {
     final ctrl = TextEditingController(text: currentTitle);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: widget.isDark ? const Color(0xFF1E2235) : Colors.white,
-        title: const Text('Rename Page', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        title: const Text(
+          'Rename Page',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
         content: TextField(
           controller: ctrl,
           autofocus: true,
@@ -5237,7 +6579,10 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           ElevatedButton(
             onPressed: () {
               final newTitle = ctrl.text.trim();
@@ -5247,7 +6592,10 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
               }
               Navigator.pop(ctx);
             },
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+            ),
             child: const Text('Save'),
           ),
         ],
@@ -5259,7 +6607,10 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
   Widget build(BuildContext context) {
     final isDark = widget.isDark;
     final pages = widget.state.canvasPages;
-    final currentIdx = widget.state.currentPageIndex.clamp(0, pages.isNotEmpty ? pages.length - 1 : 0);
+    final currentIdx = widget.state.currentPageIndex.clamp(
+      0,
+      pages.isNotEmpty ? pages.length - 1 : 0,
+    );
     final doc = widget.state.currentCanvasDoc;
 
     return Dialog(
@@ -5288,7 +6639,11 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                     gradient: AppColors.primaryGradient,
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.auto_stories_rounded, color: Colors.white, size: 20),
+                  child: const Icon(
+                    Icons.auto_stories_rounded,
+                    color: Colors.white,
+                    size: 20,
+                  ),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -5300,7 +6655,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         style: GoogleFonts.inter(
                           fontSize: 18,
                           fontWeight: FontWeight.w800,
-                          color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                          color: isDark
+                              ? AppColors.darkTextPrimary
+                              : AppColors.lightTextPrimary,
                         ),
                       ),
                       const SizedBox(height: 2),
@@ -5308,7 +6665,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         '${pages.length} ${pages.length == 1 ? "page" : "pages"} • Click any page thumbnail to navigate',
                         style: GoogleFonts.inter(
                           fontSize: 12.5,
-                          color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                          color: isDark
+                              ? AppColors.darkTextSecondary
+                              : AppColors.lightTextSecondary,
                         ),
                       ),
                     ],
@@ -5320,7 +6679,11 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                   offset: const Offset(0, 38),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
-                    side: BorderSide(color: isDark ? AppColors.darkBorder : AppColors.lightBorder),
+                    side: BorderSide(
+                      color: isDark
+                          ? AppColors.darkBorder
+                          : AppColors.lightBorder,
+                    ),
                   ),
                   color: isDark ? const Color(0xFF1E2235) : Colors.white,
                   onSelected: (style) {
@@ -5328,13 +6691,36 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                     setState(() {});
                   },
                   itemBuilder: (ctx) => [
-                    _buildTemplateMenuItem(CanvasPaperStyle.ruledLines, 'Ruled Lines (Notebook)', Icons.format_align_left_rounded, isDark),
-                    _buildTemplateMenuItem(CanvasPaperStyle.dotGrid, 'Dot Grid (Journal)', Icons.apps_rounded, isDark),
-                    _buildTemplateMenuItem(CanvasPaperStyle.graphGrid, 'Graph Grid (Math/Eng)', Icons.grid_4x4_rounded, isDark),
-                    _buildTemplateMenuItem(CanvasPaperStyle.blankSlate, 'Blank Slate (Plain)', Icons.crop_portrait_rounded, isDark),
+                    _buildTemplateMenuItem(
+                      CanvasPaperStyle.ruledLines,
+                      'Ruled Lines (Notebook)',
+                      Icons.format_align_left_rounded,
+                      isDark,
+                    ),
+                    _buildTemplateMenuItem(
+                      CanvasPaperStyle.dotGrid,
+                      'Dot Grid (Journal)',
+                      Icons.apps_rounded,
+                      isDark,
+                    ),
+                    _buildTemplateMenuItem(
+                      CanvasPaperStyle.graphGrid,
+                      'Graph Grid (Math/Eng)',
+                      Icons.grid_4x4_rounded,
+                      isDark,
+                    ),
+                    _buildTemplateMenuItem(
+                      CanvasPaperStyle.blankSlate,
+                      'Blank Slate (Plain)',
+                      Icons.crop_portrait_rounded,
+                      isDark,
+                    ),
                   ],
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: AppColors.primary,
                       borderRadius: BorderRadius.circular(10),
@@ -5349,7 +6735,11 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.add_rounded, size: 16, color: Colors.white),
+                        const Icon(
+                          Icons.add_rounded,
+                          size: 16,
+                          color: Colors.white,
+                        ),
                         const SizedBox(width: 6),
                         Text(
                           'Add Page',
@@ -5367,12 +6757,17 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                 IconButton(
                   icon: const Icon(Icons.close_rounded, size: 20),
                   onPressed: () => Navigator.pop(context),
-                  color: isDark ? AppColors.darkTextSecondary : AppColors.lightTextSecondary,
+                  color: isDark
+                      ? AppColors.darkTextSecondary
+                      : AppColors.lightTextSecondary,
                 ),
               ],
             ),
             const SizedBox(height: 18),
-            Container(height: 1, color: isDark ? const Color(0xFF262C40) : const Color(0xFFF1F5F9)),
+            Container(
+              height: 1,
+              color: isDark ? const Color(0xFF262C40) : const Color(0xFFF1F5F9),
+            ),
             const SizedBox(height: 16),
 
             // Grid of Pages
@@ -5392,7 +6787,13 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                   }
                   final page = pages[index];
                   final isCurrent = index == currentIdx;
-                  return _buildPageCard(context, page, index, isCurrent, isDark);
+                  return _buildPageCard(
+                    context,
+                    page,
+                    index,
+                    isCurrent,
+                    isDark,
+                  );
                 },
               ),
             ),
@@ -5446,7 +6847,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
         boxShadow: isCurrent
             ? [
                 BoxShadow(
-                  color: AppColors.primary.withValues(alpha: isDark ? 0.35 : 0.2),
+                  color: AppColors.primary.withValues(
+                    alpha: isDark ? 0.35 : 0.2,
+                  ),
                   blurRadius: 10,
                   offset: const Offset(0, 4),
                 ),
@@ -5476,11 +6879,16 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                 Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: isCurrent
                             ? AppColors.primary.withValues(alpha: 0.18)
-                            : (isDark ? const Color(0xFF252D44) : const Color(0xFFF1F5F9)),
+                            : (isDark
+                                  ? const Color(0xFF252D44)
+                                  : const Color(0xFFF1F5F9)),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
@@ -5488,16 +6896,23 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         style: GoogleFonts.inter(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
-                          color: isCurrent ? AppColors.primary : (isDark ? Colors.white70 : Colors.black87),
+                          color: isCurrent
+                              ? AppColors.primary
+                              : (isDark ? Colors.white70 : Colors.black87),
                         ),
                       ),
                     ),
                     if (isCurrent) ...[
                       const SizedBox(width: 5),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF10B981).withValues(alpha: 0.18),
+                          color: const Color(
+                            0xFF10B981,
+                          ).withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: const Text(
@@ -5517,9 +6932,13 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                       icon: Icon(
                         Icons.more_vert_rounded,
                         size: 16,
-                        color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+                        color: isDark
+                            ? AppColors.darkTextMuted
+                            : AppColors.lightTextMuted,
                       ),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                       color: isDark ? const Color(0xFF1E2235) : Colors.white,
                       onSelected: (action) {
                         if (action == 'duplicate') {
@@ -5528,16 +6947,28 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         } else if (action == 'rename') {
                           _promptRenamePage(context, index, page.title);
                         } else if (action == 'ruled') {
-                          widget.state.setPagePaperStyle(index, CanvasPaperStyle.ruledLines);
+                          widget.state.setPagePaperStyle(
+                            index,
+                            CanvasPaperStyle.ruledLines,
+                          );
                           setState(() {});
                         } else if (action == 'dot') {
-                          widget.state.setPagePaperStyle(index, CanvasPaperStyle.dotGrid);
+                          widget.state.setPagePaperStyle(
+                            index,
+                            CanvasPaperStyle.dotGrid,
+                          );
                           setState(() {});
                         } else if (action == 'graph') {
-                          widget.state.setPagePaperStyle(index, CanvasPaperStyle.graphGrid);
+                          widget.state.setPagePaperStyle(
+                            index,
+                            CanvasPaperStyle.graphGrid,
+                          );
                           setState(() {});
                         } else if (action == 'blank') {
-                          widget.state.setPagePaperStyle(index, CanvasPaperStyle.blankSlate);
+                          widget.state.setPagePaperStyle(
+                            index,
+                            CanvasPaperStyle.blankSlate,
+                          );
                           setState(() {});
                         } else if (action == 'delete') {
                           widget.state.deletePage(index);
@@ -5552,7 +6983,10 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                             children: [
                               Icon(Icons.copy_rounded, size: 15),
                               SizedBox(width: 8),
-                              Text('Duplicate Page', style: TextStyle(fontSize: 12.5)),
+                              Text(
+                                'Duplicate Page',
+                                style: TextStyle(fontSize: 12.5),
+                              ),
                             ],
                           ),
                         ),
@@ -5563,7 +6997,10 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                             children: [
                               Icon(Icons.edit_outlined, size: 15),
                               SizedBox(width: 8),
-                              Text('Rename Page', style: TextStyle(fontSize: 12.5)),
+                              Text(
+                                'Rename Page',
+                                style: TextStyle(fontSize: 12.5),
+                              ),
                             ],
                           ),
                         ),
@@ -5571,22 +7008,34 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         const PopupMenuItem(
                           value: 'ruled',
                           height: 34,
-                          child: Text('Template: Ruled Lines', style: TextStyle(fontSize: 12)),
+                          child: Text(
+                            'Template: Ruled Lines',
+                            style: TextStyle(fontSize: 12),
+                          ),
                         ),
                         const PopupMenuItem(
                           value: 'dot',
                           height: 34,
-                          child: Text('Template: Dot Grid', style: TextStyle(fontSize: 12)),
+                          child: Text(
+                            'Template: Dot Grid',
+                            style: TextStyle(fontSize: 12),
+                          ),
                         ),
                         const PopupMenuItem(
                           value: 'graph',
                           height: 34,
-                          child: Text('Template: Graph Grid', style: TextStyle(fontSize: 12)),
+                          child: Text(
+                            'Template: Graph Grid',
+                            style: TextStyle(fontSize: 12),
+                          ),
                         ),
                         const PopupMenuItem(
                           value: 'blank',
                           height: 34,
-                          child: Text('Template: Blank Slate', style: TextStyle(fontSize: 12)),
+                          child: Text(
+                            'Template: Blank Slate',
+                            style: TextStyle(fontSize: 12),
+                          ),
                         ),
                         if (widget.state.canvasPages.length > 1) ...[
                           const PopupMenuDivider(height: 6),
@@ -5595,9 +7044,19 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                             height: 36,
                             child: Row(
                               children: [
-                                Icon(Icons.delete_outline_rounded, size: 15, color: Colors.redAccent),
+                                Icon(
+                                  Icons.delete_outline_rounded,
+                                  size: 15,
+                                  color: Colors.redAccent,
+                                ),
                                 SizedBox(width: 8),
-                                Text('Delete Page', style: TextStyle(fontSize: 12.5, color: Colors.redAccent)),
+                                Text(
+                                  'Delete Page',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    color: Colors.redAccent,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -5613,10 +7072,14 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                   child: Container(
                     width: double.infinity,
                     decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF141724) : const Color(0xFFFFFDF8),
+                      color: isDark
+                          ? const Color(0xFF141724)
+                          : const Color(0xFFFFFDF8),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                        color: isDark ? const Color(0xFF28314B) : const Color(0xFFE5DFD5),
+                        color: isDark
+                            ? const Color(0xFF28314B)
+                            : const Color(0xFFE5DFD5),
                         width: 1.0,
                       ),
                     ),
@@ -5641,8 +7104,12 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                           height: 16,
                           child: Container(
                             decoration: BoxDecoration(
-                              color: isDark ? const Color(0xFF1C2236) : const Color(0xFFF7F4EE),
-                              borderRadius: const BorderRadius.vertical(top: Radius.circular(7)),
+                              color: isDark
+                                  ? const Color(0xFF1C2236)
+                                  : const Color(0xFFF7F4EE),
+                              borderRadius: const BorderRadius.vertical(
+                                top: Radius.circular(7),
+                              ),
                             ),
                             padding: const EdgeInsets.symmetric(horizontal: 6),
                             alignment: Alignment.centerLeft,
@@ -5653,7 +7120,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                               style: TextStyle(
                                 fontSize: 8.5,
                                 fontWeight: FontWeight.w700,
-                                color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                                color: isDark
+                                    ? const Color(0xFF94A3B8)
+                                    : const Color(0xFF64748B),
                               ),
                             ),
                           ),
@@ -5661,19 +7130,30 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         // Objects / Content Badge in center
                         Center(
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 4,
+                            ),
                             decoration: BoxDecoration(
-                              color: (isDark ? const Color(0xFF1E2438) : Colors.white).withValues(alpha: 0.88),
+                              color:
+                                  (isDark
+                                          ? const Color(0xFF1E2438)
+                                          : Colors.white)
+                                      .withValues(alpha: 0.88),
                               borderRadius: BorderRadius.circular(8),
                               border: Border.all(
-                                color: isDark ? const Color(0xFF333E5D) : const Color(0xFFCBD5E1),
+                                color: isDark
+                                    ? const Color(0xFF333E5D)
+                                    : const Color(0xFFCBD5E1),
                               ),
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
-                                  page.objects.isNotEmpty ? Icons.draw_rounded : Icons.crop_portrait_rounded,
+                                  page.objects.isNotEmpty
+                                      ? Icons.draw_rounded
+                                      : Icons.crop_portrait_rounded,
                                   size: 13,
                                   color: AppColors.primary,
                                 ),
@@ -5683,7 +7163,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                                   style: GoogleFonts.inter(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w700,
-                                    color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                                    color: isDark
+                                        ? AppColors.darkTextPrimary
+                                        : AppColors.lightTextPrimary,
                                   ),
                                 ),
                               ],
@@ -5708,7 +7190,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                         style: GoogleFonts.inter(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: isDark ? AppColors.darkTextPrimary : AppColors.lightTextPrimary,
+                          color: isDark
+                              ? AppColors.darkTextPrimary
+                              : AppColors.lightTextPrimary,
                         ),
                       ),
                     ),
@@ -5716,7 +7200,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                       paperName,
                       style: TextStyle(
                         fontSize: 10.5,
-                        color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+                        color: isDark
+                            ? AppColors.darkTextMuted
+                            : AppColors.lightTextMuted,
                       ),
                     ),
                   ],
@@ -5732,7 +7218,8 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
   Widget _buildAddPageCard(bool isDark) {
     return Container(
       decoration: BoxDecoration(
-        color: (isDark ? const Color(0xFF181D2E) : const Color(0xFFF8FAFC)).withValues(alpha: 0.6),
+        color: (isDark ? const Color(0xFF181D2E) : const Color(0xFFF8FAFC))
+            .withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
           color: isDark ? const Color(0xFF2C3550) : const Color(0xFFCBD5E1),
@@ -5759,7 +7246,11 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                     color: AppColors.primary.withValues(alpha: 0.14),
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.add_rounded, size: 24, color: AppColors.primary),
+                  child: const Icon(
+                    Icons.add_rounded,
+                    size: 24,
+                    color: AppColors.primary,
+                  ),
                 ),
                 const SizedBox(height: 10),
                 Text(
@@ -5775,7 +7266,9 @@ class _NotebookPagesOverviewDialogState extends State<_NotebookPagesOverviewDial
                   'Ruled / Dot / Graph',
                   style: TextStyle(
                     fontSize: 11,
-                    color: isDark ? AppColors.darkTextMuted : AppColors.lightTextMuted,
+                    color: isDark
+                        ? AppColors.darkTextMuted
+                        : AppColors.lightTextMuted,
                   ),
                 ),
               ],
@@ -5800,7 +7293,9 @@ class _PageThumbnailPainter extends CustomPainter {
 
     if (paperStyle == CanvasPaperStyle.ruledLines) {
       final linePaint = Paint()
-        ..color = isDark ? const Color(0xFF28324C).withValues(alpha: 0.6) : const Color(0xFFD8E1F0).withValues(alpha: 0.8)
+        ..color = isDark
+            ? const Color(0xFF28324C).withValues(alpha: 0.6)
+            : const Color(0xFFD8E1F0).withValues(alpha: 0.8)
         ..strokeWidth = 0.8;
 
       for (double y = 24.0; y < size.height - 4.0; y += 12.0) {
@@ -5811,13 +7306,19 @@ class _PageThumbnailPainter extends CustomPainter {
       final marginPaint = Paint()
         ..color = const Color(0xFFF43F5E).withValues(alpha: isDark ? 0.35 : 0.4)
         ..strokeWidth = 1.0;
-      canvas.drawLine(const Offset(18, 16), Offset(18, size.height), marginPaint);
+      canvas.drawLine(
+        const Offset(18, 16),
+        Offset(18, size.height),
+        marginPaint,
+      );
       return;
     }
 
     if (paperStyle == CanvasPaperStyle.graphGrid) {
       final gridPaint = Paint()
-        ..color = isDark ? const Color(0xFF263048).withValues(alpha: 0.6) : const Color(0xFFE2E8F0)
+        ..color = isDark
+            ? const Color(0xFF263048).withValues(alpha: 0.6)
+            : const Color(0xFFE2E8F0)
         ..strokeWidth = 0.7;
 
       for (double x = 4; x < size.width; x += 12.0) {
@@ -5831,7 +7332,9 @@ class _PageThumbnailPainter extends CustomPainter {
 
     // Dot Grid
     final dotPaint = Paint()
-      ..color = isDark ? Colors.white.withValues(alpha: 0.12) : Colors.black.withValues(alpha: 0.12)
+      ..color = isDark
+          ? Colors.white.withValues(alpha: 0.12)
+          : Colors.black.withValues(alpha: 0.12)
       ..style = PaintingStyle.fill;
 
     for (double x = 8; x < size.width - 4; x += 12.0) {
@@ -5848,6 +7351,7 @@ class _PageThumbnailPainter extends CustomPainter {
 
 // ================= CUSTOM CANVAS PAINTER (GOODNOTES IPAD NOTEBOOK STYLE) =================
 class CanvasPainter extends CustomPainter {
+  final AppState? appState;
   final List<CanvasObjectItem> objects;
   final List<StrokePoint> currentPoints;
   final CanvasTool currentTool;
@@ -5873,6 +7377,7 @@ class CanvasPainter extends CustomPainter {
   final List<CanvasPage> pages;
   final int activePageIndex;
   final String? selectedTextItemId;
+  final String? selectedImageId;
   final bool isDrawingTape;
   final Offset? tapeStartWorld;
   final Offset? tapeCurrentWorld;
@@ -5890,6 +7395,7 @@ class CanvasPainter extends CustomPainter {
   final String? editingExistingTextId;
 
   CanvasPainter({
+    this.appState,
     super.repaint,
     required this.objects,
     this.pages = const [],
@@ -5916,6 +7422,7 @@ class CanvasPainter extends CustomPainter {
     required this.pageNumber,
     required this.totalPages,
     this.selectedTextItemId,
+    this.selectedImageId,
     this.editingExistingTextId,
     this.isDrawingTape = false,
     this.tapeStartWorld,
@@ -5933,16 +7440,30 @@ class CanvasPainter extends CustomPainter {
     this.sheetPullOffset = 0.0,
   });
 
+  List<CanvasObjectItem> get effectiveObjects => appState?.canvasObjects ?? objects;
+  List<CanvasPage> get effectivePages => appState?.canvasPages ?? pages;
+  int get effectiveActivePageIndex => appState?.currentPageIndex ?? activePageIndex;
+  CanvasPaperStyle get effectivePaperStyle => appState?.canvasPaperStyle ?? paperStyle;
+  bool get effectiveIsPageViewMode => appState?.isPageViewMode ?? isPageViewMode;
+  int get effectivePageNumber => (appState?.currentPageIndex != null ? appState!.currentPageIndex + 1 : pageNumber);
+  int get effectiveTotalPages => (appState?.canvasPages.isNotEmpty == true ? appState!.canvasPages.length : totalPages);
+  String get effectivePageTitle => appState?.currentPage?.title ?? (appState != null ? 'Page ${appState!.currentPageIndex + 1}' : pageTitle);
+
   @override
   void paint(Canvas canvas, Size size) {
     // 0. Strict viewport clip: prevent canvas and page from ever painting outside widget bounds
     canvas.save();
     canvas.clipRect(Offset.zero & size);
 
-    const pageWidth  = _kPageWidth;
-    const pageRect   = Rect.fromLTWH(_kPageLeft, _kPageTop, _kPageWidth, _kPageHeight);
+    const pageWidth = _kPageWidth;
+    const pageRect = Rect.fromLTWH(
+      _kPageLeft,
+      _kPageTop,
+      _kPageWidth,
+      _kPageHeight,
+    );
 
-    if (isPageViewMode) {
+    if (effectiveIsPageViewMode) {
       // 1. Deep GoodNotes desk backdrop
       _drawDeskBackground(canvas, size);
 
@@ -5953,7 +7474,9 @@ class CanvasPainter extends CustomPainter {
 
       // 3. Strictly ONLY ONE PAGE visible on screen at one time!
       // If user swipes, animate smooth slide transition between exiting page and entering page.
-      if (isTransitioning && transitionFromPageIndex != null && transitionToPageIndex != null) {
+      if (isTransitioning &&
+          transitionFromPageIndex != null &&
+          transitionToPageIndex != null) {
         final fromIdx = transitionFromPageIndex!;
         final toIdx = transitionToPageIndex!;
         final step = pageWidth + 40.0;
@@ -5963,69 +7486,114 @@ class CanvasPainter extends CustomPainter {
         final enterOffset = exitOffset - (transitionDirection * step);
 
         // A. Draw exiting page
-        final fromStyle = (fromIdx >= 0 && fromIdx < pages.length) ? pages[fromIdx].paperStyle : paperStyle;
-        _drawGoodNotesPageSheet(canvas, xOffset: exitOffset, pageNum: fromIdx + 1, pageStyle: fromStyle);
+        final fromStyle = (fromIdx >= 0 && fromIdx < effectivePages.length)
+            ? effectivePages[fromIdx].paperStyle
+            : effectivePaperStyle;
+        _drawGoodNotesPageSheet(
+          canvas,
+          xOffset: exitOffset,
+          pageNum: fromIdx + 1,
+          pageStyle: fromStyle,
+        );
         canvas.save();
         canvas.translate(exitOffset, 0);
-        canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
-        final fromObjs = (fromIdx == activePageIndex)
-            ? objects
-            : (fromIdx >= 0 && fromIdx < pages.length ? pages[fromIdx].objects : const <CanvasObjectItem>[]);
+        canvas.clipRRect(
+          RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+        );
+        final fromObjs = (fromIdx == effectiveActivePageIndex)
+            ? effectiveObjects
+            : (fromIdx >= 0 && fromIdx < effectivePages.length
+                  ? effectivePages[fromIdx].objects
+                  : const <CanvasObjectItem>[]);
         _drawObjectsList(canvas, fromObjs);
         canvas.restore();
 
         // B. Draw entering page
-        final toStyle = (toIdx >= 0 && toIdx < pages.length) ? pages[toIdx].paperStyle : paperStyle;
-        _drawGoodNotesPageSheet(canvas, xOffset: enterOffset, pageNum: toIdx + 1, pageStyle: toStyle);
+        final toStyle = (toIdx >= 0 && toIdx < effectivePages.length)
+            ? effectivePages[toIdx].paperStyle
+            : effectivePaperStyle;
+        _drawGoodNotesPageSheet(
+          canvas,
+          xOffset: enterOffset,
+          pageNum: toIdx + 1,
+          pageStyle: toStyle,
+        );
         canvas.save();
         canvas.translate(enterOffset, 0);
-        canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
-        final toObjs = (toIdx == activePageIndex)
-            ? objects
-            : (toIdx >= 0 && toIdx < pages.length ? pages[toIdx].objects : const <CanvasObjectItem>[]);
+        canvas.clipRRect(
+          RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+        );
+        final toObjs = (toIdx == effectiveActivePageIndex)
+            ? effectiveObjects
+            : (toIdx >= 0 && toIdx < effectivePages.length
+                  ? effectivePages[toIdx].objects
+                  : const <CanvasObjectItem>[]);
         _drawObjectsList(canvas, toObjs);
         canvas.restore();
       } else {
         // Steady State: Render active page with dynamic sheetPullOffset (1:1 GoodNotes touch tracking)
-        final style = (activePageIndex >= 0 && activePageIndex < pages.length)
-            ? pages[activePageIndex].paperStyle
-            : paperStyle;
+        final style = (effectiveActivePageIndex >= 0 && effectiveActivePageIndex < effectivePages.length)
+            ? effectivePages[effectiveActivePageIndex].paperStyle
+            : effectivePaperStyle;
 
         // 1. Draw peeking adjacent page when user pulls sheet
         if (sheetPullOffset < -2.0) {
           // Pulling to the left: peek NEXT page from right
-          final nextIdx = activePageIndex + 1;
+          final nextIdx = effectiveActivePageIndex + 1;
           final peekOffset = sheetPullOffset + pageWidth + 40.0;
-          final nextStyle = (nextIdx < pages.length) ? pages[nextIdx].paperStyle : style;
-          _drawGoodNotesPageSheet(canvas, xOffset: peekOffset, pageNum: nextIdx + 1, pageStyle: nextStyle);
-          if (nextIdx < pages.length) {
+          final nextStyle = (nextIdx < effectivePages.length)
+              ? effectivePages[nextIdx].paperStyle
+              : style;
+          _drawGoodNotesPageSheet(
+            canvas,
+            xOffset: peekOffset,
+            pageNum: nextIdx + 1,
+            pageStyle: nextStyle,
+          );
+          if (nextIdx < effectivePages.length) {
             canvas.save();
             canvas.translate(peekOffset, 0);
-            canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
-            _drawObjectsList(canvas, pages[nextIdx].objects);
+            canvas.clipRRect(
+              RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+            );
+            _drawObjectsList(canvas, effectivePages[nextIdx].objects);
             canvas.restore();
           }
-        } else if (sheetPullOffset > 2.0 && activePageIndex > 0) {
+        } else if (sheetPullOffset > 2.0 && effectiveActivePageIndex > 0) {
           // Pulling to the right: peek PREVIOUS page from left
-          final prevIdx = activePageIndex - 1;
+          final prevIdx = effectiveActivePageIndex - 1;
           final peekOffset = sheetPullOffset - (pageWidth + 40.0);
-          final prevStyle = pages[prevIdx].paperStyle;
-          _drawGoodNotesPageSheet(canvas, xOffset: peekOffset, pageNum: prevIdx + 1, pageStyle: prevStyle);
+          final prevStyle = effectivePages[prevIdx].paperStyle;
+          _drawGoodNotesPageSheet(
+            canvas,
+            xOffset: peekOffset,
+            pageNum: prevIdx + 1,
+            pageStyle: prevStyle,
+          );
           canvas.save();
           canvas.translate(peekOffset, 0);
-          canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
-          _drawObjectsList(canvas, pages[prevIdx].objects);
+          canvas.clipRRect(
+            RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+          );
+          _drawObjectsList(canvas, effectivePages[prevIdx].objects);
           canvas.restore();
         }
 
         // 2. Draw Active page translated by sheetPullOffset
-        _drawGoodNotesPageSheet(canvas, xOffset: sheetPullOffset, pageNum: pageNumber, pageStyle: style);
+        _drawGoodNotesPageSheet(
+          canvas,
+          xOffset: sheetPullOffset,
+          pageNum: effectivePageNumber,
+          pageStyle: style,
+        );
 
         // Render page objects inside clipped sheet bounds
         canvas.save();
         canvas.translate(sheetPullOffset, 0);
-        canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
-        _drawObjectsList(canvas, objects);
+        canvas.clipRRect(
+          RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+        );
+        _drawObjectsList(canvas, effectiveObjects);
 
         // Live overlays (drag shape / lasso) on the active page
         _drawLiveOverlays(canvas);
@@ -6033,7 +7601,9 @@ class CanvasPainter extends CustomPainter {
       }
     } else {
       // 1. Crisp Whiteboard Canvas Backdrop
-      final boardBg = isDark ? const Color(0xFF0F172A) : const Color(0xFFFBFBFC);
+      final boardBg = isDark
+          ? const Color(0xFF0F172A)
+          : const Color(0xFFFBFBFC);
       canvas.drawRect(Offset.zero & size, Paint()..color = boardBg);
 
       // 2. Infinite Whiteboard Grid
@@ -6042,7 +7612,13 @@ class CanvasPainter extends CustomPainter {
       canvas.translate(panOffset.dx, panOffset.dy);
       canvas.scale(zoomScale);
 
-      _drawObjectsList(canvas, objects);
+      final visibleBounds = Rect.fromLTWH(
+        -panOffset.dx / zoomScale,
+        -panOffset.dy / zoomScale,
+        size.width / zoomScale,
+        size.height / zoomScale,
+      ).inflate(64.0);
+      _drawObjectsList(canvas, effectiveObjects, visibleBounds: visibleBounds);
       _drawLiveOverlays(canvas);
     }
 
@@ -6050,9 +7626,16 @@ class CanvasPainter extends CustomPainter {
     canvas.restore(); // restore viewport clip
   }
 
-  void _drawObjectsList(Canvas canvas, List<CanvasObjectItem> objs) {
+  void _drawObjectsList(
+    Canvas canvas,
+    List<CanvasObjectItem> objs, {
+    Rect? visibleBounds,
+  }) {
     // Highlighters first (underneath all ink strokes and shapes)
     for (var obj in objs) {
+      if (visibleBounds != null && !visibleBounds.overlaps(obj.getBoundingBox())) {
+        continue;
+      }
       if (obj is CanvasStrokeItem && obj.tool == 'highlighter') {
         StrokeEngine.drawVariableWidthStroke(
           canvas,
@@ -6066,6 +7649,9 @@ class CanvasPainter extends CustomPainter {
 
     // Opaque pen strokes, shapes, and text
     for (var obj in objs) {
+      if (visibleBounds != null && !visibleBounds.overlaps(obj.getBoundingBox())) {
+        continue;
+      }
       if (obj is CanvasStrokeItem && obj.tool != 'highlighter') {
         StrokeEngine.drawVariableWidthStroke(
           canvas,
@@ -6122,7 +7708,21 @@ class CanvasPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = currentWidth;
         canvas.drawOval(rect, paint);
-      } else if (currentTool == CanvasTool.line || currentTool == CanvasTool.arrow) {
+      } else if (currentTool == CanvasTool.triangle) {
+        final paint = Paint()
+          ..color = currentColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = currentWidth
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+        final triPath = Path()
+          ..moveTo(rect.topCenter.dx, rect.topCenter.dy)
+          ..lineTo(rect.bottomRight.dx, rect.bottomRight.dy)
+          ..lineTo(rect.bottomLeft.dx, rect.bottomLeft.dy)
+          ..close();
+        canvas.drawPath(triPath, paint);
+      } else if (currentTool == CanvasTool.line ||
+          currentTool == CanvasTool.arrow) {
         final paint = Paint()
           ..color = currentColor
           ..strokeWidth = currentWidth
@@ -6133,7 +7733,8 @@ class CanvasPainter extends CustomPainter {
 
     // Draw live freehand lasso loop
     if (currentTool == CanvasTool.lasso && lassoPoints.length > 1) {
-      final lassoPath = Path()..moveTo(lassoPoints.first.dx, lassoPoints.first.dy);
+      final lassoPath = Path()
+        ..moveTo(lassoPoints.first.dx, lassoPoints.first.dy);
       for (int i = 1; i < lassoPoints.length; i++) {
         lassoPath.lineTo(lassoPoints[i].dx, lassoPoints[i].dy);
       }
@@ -6156,8 +7757,16 @@ class CanvasPainter extends CustomPainter {
       final left = math.min(tapeStartWorld!.dx, tapeCurrentWorld!.dx);
       final top = math.min(tapeStartWorld!.dy, tapeCurrentWorld!.dy);
       final width = (tapeCurrentWorld!.dx - tapeStartWorld!.dx).abs();
-      final previewRect = Rect.fromLTWH(left, top, math.max(width, 24.0), tapeHeight);
-      final rrect = RRect.fromRectAndRadius(previewRect, const Radius.circular(4));
+      final previewRect = Rect.fromLTWH(
+        left,
+        top,
+        math.max(width, 24.0),
+        tapeHeight,
+      );
+      final rrect = RRect.fromRectAndRadius(
+        previewRect,
+        const Radius.circular(4),
+      );
 
       final liveTapePaint = Paint()
         ..color = tapeColor.withValues(alpha: 0.85)
@@ -6185,14 +7794,19 @@ class CanvasPainter extends CustomPainter {
     int pageNum = 1,
     CanvasPaperStyle? pageStyle,
   }) {
-    final effectiveStyle = pageStyle ?? paperStyle;
+    final effectiveStyle = pageStyle ?? effectivePaperStyle;
     // GoodNotes Standard iPad A4 Page Dimensions (World coordinates)
-    const pageWidth  = _kPageWidth;
+    const pageWidth = _kPageWidth;
     const pageHeight = _kPageHeight;
-    final pageLeft   = _kPageLeft + xOffset;     // shifted horizontally by xOffset for side-by-side pages
-    const pageTop    = _kPageTop;
-    final pageRect  = Rect.fromLTWH(pageLeft, pageTop, pageWidth, pageHeight);
-    final pageRRect = RRect.fromRectAndRadius(pageRect, const Radius.circular(4));
+    final pageLeft =
+        _kPageLeft +
+        xOffset; // shifted horizontally by xOffset for side-by-side pages
+    const pageTop = _kPageTop;
+    final pageRect = Rect.fromLTWH(pageLeft, pageTop, pageWidth, pageHeight);
+    final pageRRect = RRect.fromRectAndRadius(
+      pageRect,
+      const Radius.circular(4),
+    );
 
     // A. Dual Drop Shadows (Ambient + Key)
     final ambientShadow = Paint()
@@ -6219,7 +7833,9 @@ class CanvasPainter extends CustomPainter {
     // D. Inner Paper Style (Ruled, Narrow, Dot, Graph, Cornell, Planner, Blank)
     if (effectiveStyle == CanvasPaperStyle.ruledLines) {
       final linePaint = Paint()
-        ..color = isDark ? const Color(0xFF28324C).withValues(alpha: 0.7) : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF28324C).withValues(alpha: 0.7)
+            : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.0;
 
@@ -6227,19 +7843,31 @@ class CanvasPainter extends CustomPainter {
       final startY = pageTop + 48.0 + 28.0;
       final endY = pageTop + pageHeight - 20.0;
       for (double y = startY; y < endY; y += lineHeight) {
-        canvas.drawLine(Offset(pageLeft, y), Offset(pageLeft + pageWidth, y), linePaint);
+        canvas.drawLine(
+          Offset(pageLeft, y),
+          Offset(pageLeft + pageWidth, y),
+          linePaint,
+        );
       }
 
       // Vertical rose notebook margin line (iPad GoodNotes style)
       final marginX = pageLeft + 72.0;
       final marginPaint = Paint()
-        ..color = const Color(0xFFF43F5E).withValues(alpha: isDark ? 0.35 : 0.45)
+        ..color = const Color(
+          0xFFF43F5E,
+        ).withValues(alpha: isDark ? 0.35 : 0.45)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
-      canvas.drawLine(Offset(marginX, pageTop + 48.0), Offset(marginX, pageTop + pageHeight), marginPaint);
+      canvas.drawLine(
+        Offset(marginX, pageTop + 48.0),
+        Offset(marginX, pageTop + pageHeight),
+        marginPaint,
+      );
     } else if (effectiveStyle == CanvasPaperStyle.narrowRuled) {
       final linePaint = Paint()
-        ..color = isDark ? const Color(0xFF28324C).withValues(alpha: 0.7) : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF28324C).withValues(alpha: 0.7)
+            : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 0.9;
 
@@ -6247,42 +7875,70 @@ class CanvasPainter extends CustomPainter {
       final startY = pageTop + 48.0 + 22.0;
       final endY = pageTop + pageHeight - 20.0;
       for (double y = startY; y < endY; y += lineHeight) {
-        canvas.drawLine(Offset(pageLeft, y), Offset(pageLeft + pageWidth, y), linePaint);
+        canvas.drawLine(
+          Offset(pageLeft, y),
+          Offset(pageLeft + pageWidth, y),
+          linePaint,
+        );
       }
 
       final marginX = pageLeft + 72.0;
       final marginPaint = Paint()
-        ..color = const Color(0xFFF43F5E).withValues(alpha: isDark ? 0.35 : 0.45)
+        ..color = const Color(
+          0xFFF43F5E,
+        ).withValues(alpha: isDark ? 0.35 : 0.45)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
-      canvas.drawLine(Offset(marginX, pageTop + 48.0), Offset(marginX, pageTop + pageHeight), marginPaint);
+      canvas.drawLine(
+        Offset(marginX, pageTop + 48.0),
+        Offset(marginX, pageTop + pageHeight),
+        marginPaint,
+      );
     } else if (effectiveStyle == CanvasPaperStyle.graphGrid) {
       final gridPaint = Paint()
-        ..color = isDark ? const Color(0xFF252C40).withValues(alpha: 0.65) : const Color(0xFFE2E8F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF252C40).withValues(alpha: 0.65)
+            : const Color(0xFFE2E8F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 0.8;
 
       const step = 28.0;
       for (double x = pageLeft; x <= pageLeft + pageWidth; x += step) {
-        canvas.drawLine(Offset(x, pageTop + 48.0), Offset(x, pageTop + pageHeight), gridPaint);
+        canvas.drawLine(
+          Offset(x, pageTop + 48.0),
+          Offset(x, pageTop + pageHeight),
+          gridPaint,
+        );
       }
       for (double y = pageTop + 48.0; y <= pageTop + pageHeight; y += step) {
-        canvas.drawLine(Offset(pageLeft, y), Offset(pageLeft + pageWidth, y), gridPaint);
+        canvas.drawLine(
+          Offset(pageLeft, y),
+          Offset(pageLeft + pageWidth, y),
+          gridPaint,
+        );
       }
     } else if (effectiveStyle == CanvasPaperStyle.dotGrid) {
       final dotPaint = Paint()
-        ..color = isDark ? Colors.white.withValues(alpha: 0.12) : Colors.black.withValues(alpha: 0.12)
+        ..color = isDark
+            ? Colors.white.withValues(alpha: 0.12)
+            : Colors.black.withValues(alpha: 0.12)
         ..style = PaintingStyle.fill;
 
       const step = 28.0;
       for (double x = pageLeft + 20.0; x < pageLeft + pageWidth; x += step) {
-        for (double y = pageTop + 48.0 + 20.0; y < pageTop + pageHeight - 10.0; y += step) {
+        for (
+          double y = pageTop + 48.0 + 20.0;
+          y < pageTop + pageHeight - 10.0;
+          y += step
+        ) {
           canvas.drawCircle(Offset(x, y), 1.2, dotPaint);
         }
       }
     } else if (effectiveStyle == CanvasPaperStyle.cornell) {
       final linePaint = Paint()
-        ..color = isDark ? const Color(0xFF28324C).withValues(alpha: 0.7) : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF28324C).withValues(alpha: 0.7)
+            : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.0;
 
@@ -6293,7 +7949,11 @@ class CanvasPainter extends CustomPainter {
 
       // Right-hand notes area ruled lines
       for (double y = startY; y < summaryY; y += lineHeight) {
-        canvas.drawLine(Offset(cueX, y), Offset(pageLeft + pageWidth, y), linePaint);
+        canvas.drawLine(
+          Offset(cueX, y),
+          Offset(pageLeft + pageWidth, y),
+          linePaint,
+        );
       }
 
       final borderPaint = Paint()
@@ -6302,14 +7962,30 @@ class CanvasPainter extends CustomPainter {
         ..strokeWidth = 1.5;
 
       // Vertical cue column divider
-      canvas.drawLine(Offset(cueX, pageTop + 48.0), Offset(cueX, summaryY), borderPaint);
+      canvas.drawLine(
+        Offset(cueX, pageTop + 48.0),
+        Offset(cueX, summaryY),
+        borderPaint,
+      );
 
       // Horizontal summary section divider
-      canvas.drawLine(Offset(pageLeft, summaryY), Offset(pageLeft + pageWidth, summaryY), borderPaint);
+      canvas.drawLine(
+        Offset(pageLeft, summaryY),
+        Offset(pageLeft + pageWidth, summaryY),
+        borderPaint,
+      );
 
       // Summary section ruled lines
-      for (double y = summaryY + 36.0; y < pageTop + pageHeight - 10.0; y += lineHeight) {
-        canvas.drawLine(Offset(pageLeft, y), Offset(pageLeft + pageWidth, y), linePaint);
+      for (
+        double y = summaryY + 36.0;
+        y < pageTop + pageHeight - 10.0;
+        y += lineHeight
+      ) {
+        canvas.drawLine(
+          Offset(pageLeft, y),
+          Offset(pageLeft + pageWidth, y),
+          linePaint,
+        );
       }
 
       // Column Labels
@@ -6356,7 +8032,9 @@ class CanvasPainter extends CustomPainter {
       sumPainter.paint(canvas, Offset(pageLeft + 14, summaryY + 10));
     } else if (effectiveStyle == CanvasPaperStyle.planner) {
       final linePaint = Paint()
-        ..color = isDark ? const Color(0xFF28324C).withValues(alpha: 0.7) : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF28324C).withValues(alpha: 0.7)
+            : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.0;
 
@@ -6366,11 +8044,19 @@ class CanvasPainter extends CustomPainter {
       final splitX = pageLeft + 140.0;
 
       // Vertical schedule divider
-      canvas.drawLine(Offset(splitX, pageTop + 48.0), Offset(splitX, pageTop + pageHeight), linePaint..strokeWidth = 1.4);
+      canvas.drawLine(
+        Offset(splitX, pageTop + 48.0),
+        Offset(splitX, pageTop + pageHeight),
+        linePaint..strokeWidth = 1.4,
+      );
 
       // Time slots on left, ruled notes on right
       for (double y = startY; y < endY; y += lineHeight) {
-        canvas.drawLine(Offset(splitX, y), Offset(pageLeft + pageWidth, y), linePaint..strokeWidth = 1.0);
+        canvas.drawLine(
+          Offset(splitX, y),
+          Offset(pageLeft + pageWidth, y),
+          linePaint..strokeWidth = 1.0,
+        );
       }
 
       // Schedule column header
@@ -6391,18 +8077,27 @@ class CanvasPainter extends CustomPainter {
 
     // E. Page Header Ribbon Section (Top of Sheet)
     const headerHeight = 48.0;
-    final headerRect = Rect.fromLTWH(pageLeft, pageTop, pageWidth, headerHeight);
+    final headerRect = Rect.fromLTWH(
+      pageLeft,
+      pageTop,
+      pageWidth,
+      headerHeight,
+    );
     final headerBgPaint = Paint()
       ..color = isDark ? const Color(0xFF1F2539) : const Color(0xFFF7F4EE)
       ..style = PaintingStyle.fill;
     canvas.drawRect(headerRect, headerBgPaint);
 
     // Header bottom divider line
-    final headerBorderColor = isDark ? const Color(0xFF2D354E) : const Color(0xFFE5DFD5);
+    final headerBorderColor = isDark
+        ? const Color(0xFF2D354E)
+        : const Color(0xFFE5DFD5);
     canvas.drawLine(
       Offset(pageLeft, pageTop + headerHeight),
       Offset(pageLeft + pageWidth, pageTop + headerHeight),
-      Paint()..color = headerBorderColor..strokeWidth = 1.0,
+      Paint()
+        ..color = headerBorderColor
+        ..strokeWidth = 1.0,
     );
 
     // Small subtle tab number (not the loud PAGE X OF Y)
@@ -6411,7 +8106,9 @@ class CanvasPainter extends CustomPainter {
         text: TextSpan(
           text: '$pageNum',
           style: TextStyle(
-            color: isDark ? const Color(0xFF6366F1).withValues(alpha: 0.5) : const Color(0xFF6366F1).withValues(alpha: 0.4),
+            color: isDark
+                ? const Color(0xFF6366F1).withValues(alpha: 0.5)
+                : const Color(0xFF6366F1).withValues(alpha: 0.4),
             fontWeight: FontWeight.w800,
             fontSize: 10,
             letterSpacing: 0.5,
@@ -6420,13 +8117,16 @@ class CanvasPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       );
       numPainter.layout();
-      numPainter.paint(canvas, Offset(pageLeft + pageWidth - numPainter.width - 16, pageTop + 16.0));
+      numPainter.paint(
+        canvas,
+        Offset(pageLeft + pageWidth - numPainter.width - 16, pageTop + 16.0),
+      );
     }
 
     // Hanging Bookmark Ribbon on Top Right (only current page)
     if (pageNum == pageNumber) {
-      final ribbonLeft   = pageLeft + pageWidth - 48.0;
-      const ribbonWidth  = 24.0;
+      final ribbonLeft = pageLeft + pageWidth - 48.0;
+      const ribbonWidth = 24.0;
       const ribbonHeight = 56.0;
       final ribbonPath = Path()
         ..moveTo(ribbonLeft, pageTop)
@@ -6450,15 +8150,15 @@ class CanvasPainter extends CustomPainter {
     );
   }
 
-
-
   void _drawInfiniteGrid(Canvas canvas, Size size) {
-    if (paperStyle == CanvasPaperStyle.blankSlate) return;
+    if (effectivePaperStyle == CanvasPaperStyle.blankSlate) return;
 
-    if (paperStyle == CanvasPaperStyle.ruledLines) {
+    if (effectivePaperStyle == CanvasPaperStyle.ruledLines) {
       // Authentic iPad Ruled Notebook Paper
       final rulePaint = Paint()
-        ..color = isDark ? const Color(0xFF283046).withValues(alpha: 0.7) : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF283046).withValues(alpha: 0.7)
+            : const Color(0xFFD8E1F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = (1.0 * zoomScale.clamp(0.8, 1.2)).clamp(0.8, 1.5);
 
@@ -6475,18 +8175,26 @@ class CanvasPainter extends CustomPainter {
       final marginX = panOffset.dx + (72.0 * zoomScale);
       if (marginX >= 0 && marginX <= size.width) {
         final marginPaint = Paint()
-          ..color = const Color(0xFFF43F5E).withValues(alpha: isDark ? 0.35 : 0.45)
+          ..color = const Color(
+            0xFFF43F5E,
+          ).withValues(alpha: isDark ? 0.35 : 0.45)
           ..style = PaintingStyle.stroke
           ..strokeWidth = (1.5 * zoomScale.clamp(0.8, 1.2)).clamp(1.0, 2.0);
-        canvas.drawLine(Offset(marginX, 0), Offset(marginX, size.height), marginPaint);
+        canvas.drawLine(
+          Offset(marginX, 0),
+          Offset(marginX, size.height),
+          marginPaint,
+        );
       }
       return;
     }
 
-    if (paperStyle == CanvasPaperStyle.graphGrid) {
+    if (effectivePaperStyle == CanvasPaperStyle.graphGrid) {
       // Engineering Graph Grid
       final gridPaint = Paint()
-        ..color = isDark ? const Color(0xFF252C40).withValues(alpha: 0.65) : const Color(0xFFE2E8F0).withValues(alpha: 0.85)
+        ..color = isDark
+            ? const Color(0xFF252C40).withValues(alpha: 0.65)
+            : const Color(0xFFE2E8F0).withValues(alpha: 0.85)
         ..style = PaintingStyle.stroke
         ..strokeWidth = (0.8 * zoomScale.clamp(0.7, 1.2)).clamp(0.6, 1.2);
 
@@ -6507,7 +8215,9 @@ class CanvasPainter extends CustomPainter {
 
     // Default Dot Grid
     final dotPaint = Paint()
-      ..color = isDark ? Colors.white.withValues(alpha: 0.055) : Colors.black.withValues(alpha: 0.06)
+      ..color = isDark
+          ? Colors.white.withValues(alpha: 0.055)
+          : Colors.black.withValues(alpha: 0.06)
       ..style = PaintingStyle.fill;
 
     const baseStep = 28.0;
@@ -6535,8 +8245,8 @@ class CanvasPainter extends CustomPainter {
 
     final fillPaint = shape.fillColor != null
         ? (Paint()
-          ..color = shape.fillColor!
-          ..style = PaintingStyle.fill)
+            ..color = shape.fillColor!
+            ..style = PaintingStyle.fill)
         : null;
 
     if (shape.rotation != 0) {
@@ -6665,7 +8375,10 @@ class CanvasPainter extends CustomPainter {
   }
 
   void _drawImage(Canvas canvas, CanvasImageItem image) {
-    final rrect = RRect.fromRectAndRadius(image.bounds, const Radius.circular(12));
+    final rrect = RRect.fromRectAndRadius(
+      image.bounds,
+      const Radius.circular(12),
+    );
 
     final cachedImg = imageCache?[image.id];
     if (cachedImg != null) {
@@ -6673,7 +8386,12 @@ class CanvasPainter extends CustomPainter {
       canvas.clipRRect(rrect);
       canvas.drawImageRect(
         cachedImg,
-        Rect.fromLTWH(0, 0, cachedImg.width.toDouble(), cachedImg.height.toDouble()),
+        Rect.fromLTWH(
+          0,
+          0,
+          cachedImg.width.toDouble(),
+          cachedImg.height.toDouble(),
+        ),
         image.bounds,
         Paint()..filterQuality = FilterQuality.medium,
       );
@@ -6685,19 +8403,37 @@ class CanvasPainter extends CustomPainter {
         ..strokeWidth = 1.2;
       canvas.drawRRect(rrect, borderPaint);
     } else {
-      if (image.base64Data != null && onImageDecoded != null && !(loadingImages?.contains(image.id) ?? false)) {
+      // Asynchronously decode base64 off the paint cycle so rendering never hitches/lags
+      if (image.base64Data != null &&
+          onImageDecoded != null &&
+          !(loadingImages?.contains(image.id) ?? false)) {
         loadingImages?.add(image.id);
-        try {
-          final bytes = base64Decode(image.base64Data!);
-          ui.decodeImageFromList(bytes, (ui.Image img) {
-            imageCache?[image.id] = img;
-            onImageDecoded!();
-          });
-        } catch (_) {}
+        final rawBase64 = image.base64Data!;
+        final imgId = image.id;
+        final callback = onImageDecoded;
+        Future.microtask(() async {
+          try {
+            final bytes = base64Decode(rawBase64);
+            final codec =
+                await ui.instantiateImageCodec(bytes, targetWidth: 1600);
+            final frame = await codec.getNextFrame();
+            imageCache?[imgId] = frame.image;
+            callback?.call();
+          } catch (_) {
+            try {
+              final bytes = base64Decode(rawBase64);
+              ui.decodeImageFromList(bytes, (ui.Image img) {
+                imageCache?[imgId] = img;
+                callback?.call();
+              });
+            } catch (_) {}
+          }
+        });
       }
 
       final bgPaint = Paint()
-        ..color = (isDark ? const Color(0xFF1E2436) : const Color(0xFFF8FAFC)).withValues(alpha: 0.95)
+        ..color = (isDark ? const Color(0xFF1E2436) : const Color(0xFFF8FAFC))
+            .withValues(alpha: 0.95)
         ..style = PaintingStyle.fill;
       canvas.drawRRect(rrect, bgPaint);
 
@@ -6719,7 +8455,40 @@ class CanvasPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       );
       iconPainter.layout();
-      iconPainter.paint(canvas, Offset(image.bounds.left + 12, image.bounds.top + 12));
+      iconPainter.paint(
+        canvas,
+        Offset(image.bounds.left + 12, image.bounds.top + 12),
+      );
+    }
+
+    // GoodNotes style selection border & 4 corner resize handles
+    if (selectedImageId == image.id) {
+      final selPaint = Paint()
+        ..color = const Color(0xFF3B82F6)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0 / zoomScale;
+      canvas.drawRRect(rrect, selPaint);
+
+      final handleFill = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.fill;
+      final handleStroke = Paint()
+        ..color = const Color(0xFF3B82F6)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0 / zoomScale;
+
+      final handleRadius = 6.0 / zoomScale;
+      final corners = [
+        image.bounds.topLeft,
+        image.bounds.topRight,
+        image.bounds.bottomLeft,
+        image.bounds.bottomRight,
+      ];
+
+      for (final corner in corners) {
+        canvas.drawCircle(corner, handleRadius, handleFill);
+        canvas.drawCircle(corner, handleRadius, handleStroke);
+      }
     }
   }
 
@@ -6764,7 +8533,9 @@ class CanvasPainter extends CustomPainter {
               TextSpan(
                 text: '  •  ${textItem.title}',
                 style: TextStyle(
-                  color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
+                  color: isDark
+                      ? const Color(0xFFCBD5E1)
+                      : const Color(0xFF475569),
                   fontSize: 12.0,
                   fontWeight: FontWeight.w600,
                 ),
@@ -6783,7 +8554,9 @@ class CanvasPainter extends CustomPainter {
             TextSpan(
               text: '${textItem.formattedDate}  ',
               style: TextStyle(
-                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+                color: isDark
+                    ? const Color(0xFF64748B)
+                    : const Color(0xFF94A3B8),
                 fontSize: 10.5,
                 fontWeight: FontWeight.w500,
               ),
@@ -6820,7 +8593,9 @@ class CanvasPainter extends CustomPainter {
               TextSpan(
                 text: textItem.userPrompt!,
                 style: TextStyle(
-                  color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF334155),
+                  color: isDark
+                      ? const Color(0xFFE2E8F0)
+                      : const Color(0xFF334155),
                   fontSize: 12.5,
                   fontWeight: FontWeight.w500,
                   fontStyle: FontStyle.italic,
@@ -6852,7 +8627,11 @@ class CanvasPainter extends CustomPainter {
       // Compute Total Dimensions
       final cardW = maxWidth;
       final topSectionH = 40.0;
-      final cardH = topSectionH + (promptBoxHeight > 0 ? promptBoxHeight + 10.0 : 0.0) + bodyPainter.height + 36.0;
+      final cardH =
+          topSectionH +
+          (promptBoxHeight > 0 ? promptBoxHeight + 10.0 : 0.0) +
+          bodyPainter.height +
+          36.0;
 
       final cardRect = RRect.fromRectAndRadius(
         Rect.fromLTWH(textItem.position.dx, textItem.position.dy, cardW, cardH),
@@ -6871,7 +8650,9 @@ class CanvasPainter extends CustomPainter {
       canvas.drawRRect(cardRect.shift(const Offset(0, 2)), sharpShadow);
 
       // 5. Draw Paper Card Background Fill (Cream Ivory in light mode, Obsidian in dark mode)
-      final paperBgColor = isDark ? const Color(0xFF181C2B) : const Color(0xFFFFFDF8);
+      final paperBgColor = isDark
+          ? const Color(0xFF181C2B)
+          : const Color(0xFFFFFDF8);
       final bgPaint = Paint()
         ..color = paperBgColor
         ..style = PaintingStyle.fill;
@@ -6879,11 +8660,17 @@ class CanvasPainter extends CustomPainter {
 
       // 6. Draw Subtle Faint Interior Ruled Lines across the body (notebook feel)
       final noteRulePaint = Paint()
-        ..color = isDark ? const Color(0xFF232B40).withValues(alpha: 0.6) : const Color(0xFFEDE7DC).withValues(alpha: 0.8)
+        ..color = isDark
+            ? const Color(0xFF232B40).withValues(alpha: 0.6)
+            : const Color(0xFFEDE7DC).withValues(alpha: 0.8)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 0.8;
 
-      final bodyStartY = textItem.position.dy + topSectionH + (promptBoxHeight > 0 ? promptBoxHeight + 10.0 : 0.0) + 16.0;
+      final bodyStartY =
+          textItem.position.dy +
+          topSectionH +
+          (promptBoxHeight > 0 ? promptBoxHeight + 10.0 : 0.0) +
+          16.0;
       final bodyEndY = textItem.position.dy + cardH - 16.0;
       for (double y = bodyStartY; y < bodyEndY; y += 24.0) {
         canvas.drawLine(
@@ -6894,7 +8681,9 @@ class CanvasPainter extends CustomPainter {
       }
 
       // 7. Draw Card Border
-      final borderColor = isDark ? const Color(0xFF2E3750) : const Color(0xFFE5DFD5);
+      final borderColor = isDark
+          ? const Color(0xFF2E3750)
+          : const Color(0xFFE5DFD5);
       final borderPaint = Paint()
         ..color = borderColor
         ..style = PaintingStyle.stroke
@@ -6903,7 +8692,12 @@ class CanvasPainter extends CustomPainter {
 
       // 8. Draw Header Background & Top Accent Ribbon
       final headerRect = RRect.fromRectAndCorners(
-        Rect.fromLTWH(textItem.position.dx, textItem.position.dy, cardW, topSectionH),
+        Rect.fromLTWH(
+          textItem.position.dx,
+          textItem.position.dy,
+          cardW,
+          topSectionH,
+        ),
         topLeft: const Radius.circular(16),
         topRight: const Radius.circular(16),
       );
@@ -6926,8 +8720,13 @@ class CanvasPainter extends CustomPainter {
       // Header bottom divider line
       canvas.drawLine(
         Offset(textItem.position.dx, textItem.position.dy + topSectionH),
-        Offset(textItem.position.dx + cardW, textItem.position.dy + topSectionH),
-        Paint()..color = borderColor..strokeWidth = 1.0,
+        Offset(
+          textItem.position.dx + cardW,
+          textItem.position.dy + topSectionH,
+        ),
+        Paint()
+          ..color = borderColor
+          ..strokeWidth = 1.0,
       );
 
       // Paint Header Texts
@@ -6937,14 +8736,22 @@ class CanvasPainter extends CustomPainter {
       );
       metaPainter.paint(
         canvas,
-        Offset(textItem.position.dx + cardW - metaPainter.width - 18.0, textItem.position.dy + 12.0),
+        Offset(
+          textItem.position.dx + cardW - metaPainter.width - 18.0,
+          textItem.position.dy + 12.0,
+        ),
       );
 
       // 9. Paint User Prompt Box (if present)
       double currentY = textItem.position.dy + topSectionH + 10.0;
       if (promptPainter != null) {
         final promptBoxRect = RRect.fromRectAndRadius(
-          Rect.fromLTWH(textItem.position.dx + 16.0, currentY, cardW - 32.0, promptBoxHeight),
+          Rect.fromLTWH(
+            textItem.position.dx + 16.0,
+            currentY,
+            cardW - 32.0,
+            promptBoxHeight,
+          ),
           const Radius.circular(8),
         );
         final promptBgPaint = Paint()
@@ -6958,22 +8765,32 @@ class CanvasPainter extends CustomPainter {
           ..strokeWidth = 1.0;
         canvas.drawRRect(promptBoxRect, promptBorderPaint);
 
-        promptPainter.paint(canvas, Offset(textItem.position.dx + 26.0, currentY + 8.0));
+        promptPainter.paint(
+          canvas,
+          Offset(textItem.position.dx + 26.0, currentY + 8.0),
+        );
         currentY += promptBoxHeight + 10.0;
       }
 
       // 10. Paint Body Text
-      bodyPainter.paint(canvas, Offset(textItem.position.dx + 18.0, currentY + 4.0));
+      bodyPainter.paint(
+        canvas,
+        Offset(textItem.position.dx + 18.0, currentY + 4.0),
+      );
     } else {
       // If actively editing this item inline, hide static drawing to avoid ghosting/text doubling
-      if (editingExistingTextId != null && editingExistingTextId == textItem.id) {
+      if (editingExistingTextId != null &&
+          editingExistingTextId == textItem.id) {
         return;
       }
 
       // User typed notes on canvas with GoodNotes typography & styling
       TextDecoration decoration = TextDecoration.none;
       if (textItem.isUnderline && textItem.isStrikethrough) {
-        decoration = TextDecoration.combine([TextDecoration.underline, TextDecoration.lineThrough]);
+        decoration = TextDecoration.combine([
+          TextDecoration.underline,
+          TextDecoration.lineThrough,
+        ]);
       } else if (textItem.isUnderline) {
         decoration = TextDecoration.underline;
       } else if (textItem.isStrikethrough) {
@@ -7005,10 +8822,7 @@ class CanvasPainter extends CustomPainter {
 
       final layoutWidth = (textItem.boxWidth ?? maxWidth).clamp(60.0, 2400.0);
       final textPainter = TextPainter(
-        text: TextSpan(
-          text: textItem.text,
-          style: textStyle,
-        ),
+        text: TextSpan(text: textItem.text, style: textStyle),
         textAlign: textItem.alignment,
         textDirection: TextDirection.ltr,
       );
@@ -7062,7 +8876,8 @@ class CanvasPainter extends CustomPainter {
       }
 
       // 3. GoodNotes Selection Box & Grips
-      final isSelected = (selectedTextItemId == textItem.id) || textItem.isSelected;
+      final isSelected =
+          (selectedTextItemId == textItem.id) || textItem.isSelected;
 
       if (isSelected) {
         // Selection subtle fill tint
@@ -7113,7 +8928,11 @@ class CanvasPainter extends CustomPainter {
 
         for (final center in [leftCenter, rightCenter]) {
           final pillRect = RRect.fromRectAndRadius(
-            Rect.fromCenter(center: center, width: sidePillW, height: sidePillH),
+            Rect.fromCenter(
+              center: center,
+              width: sidePillW,
+              height: sidePillH,
+            ),
             Radius.circular(sidePillW / 2),
           );
           canvas.drawRRect(pillRect, handleBgPaint);
@@ -7121,9 +8940,16 @@ class CanvasPainter extends CustomPainter {
         }
 
         // Top Drag/Move Bar ("⠿ Move")
-        final moveCenter = Offset(boxRect.center.dx, boxRect.top - (14.0 / zoomScale));
+        final moveCenter = Offset(
+          boxRect.center.dx,
+          boxRect.top - (14.0 / zoomScale),
+        );
         final movePillRect = RRect.fromRectAndRadius(
-          Rect.fromCenter(center: moveCenter, width: 44.0 / zoomScale, height: 16.0 / zoomScale),
+          Rect.fromCenter(
+            center: moveCenter,
+            width: 44.0 / zoomScale,
+            height: 16.0 / zoomScale,
+          ),
           Radius.circular(8.0 / zoomScale),
         );
         canvas.drawRRect(
@@ -7160,25 +8986,7 @@ class CanvasPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CanvasPainter old) {
-    return old.objects.length != objects.length ||
-        !identical(old.objects, objects) ||
-        old.activePageIndex != activePageIndex ||
-        old.panOffset != panOffset ||
-        old.zoomScale != zoomScale ||
-        old.isDark != isDark ||
-        old.paperStyle != paperStyle ||
-        old.isPageViewMode != isPageViewMode ||
-        old.sheetPullOffset != sheetPullOffset ||
-        old.isTransitioning != isTransitioning ||
-        old.transitionProgress != transitionProgress ||
-        old.dragStart != dragStart ||
-        old.dragCurrent != dragCurrent ||
-        old.lassoPoints.length != lassoPoints.length ||
-        old.selectedTextItemId != selectedTextItemId ||
-        old.editingExistingTextId != editingExistingTextId ||
-        old.isDrawingTape != isDrawingTape ||
-        old.tapeCurrentWorld != tapeCurrentWorld ||
-        old.currentTool != currentTool;
+    return true;
   }
 }
 
@@ -7206,7 +9014,8 @@ class _LaserPointerPainter extends CustomPainter {
   final Offset? activePoint;
   final bool isDrawing;
   final double dotAlpha;
-  final double masterFade; // 1.0 when active/holding, fades to 0.0 during dissolution
+  final double
+  masterFade; // 1.0 when active/holding, fades to 0.0 during dissolution
   final bool isPageViewMode;
   final Offset panOffset;
   final double zoomScale;
@@ -7398,16 +9207,8 @@ class _LaserPointerPainter extends CustomPainter {
         ..color = color.withValues(alpha: 0.45)
         ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),
     );
-    canvas.drawCircle(
-      pos,
-      7.0,
-      Paint()..color = color.withValues(alpha: 0.95),
-    );
-    canvas.drawCircle(
-      pos,
-      3.5,
-      Paint()..color = Colors.white,
-    );
+    canvas.drawCircle(pos, 7.0, Paint()..color = color.withValues(alpha: 0.95));
+    canvas.drawCircle(pos, 3.5, Paint()..color = Colors.white);
     canvas.drawCircle(
       pos + const Offset(-1.2, -1.2),
       1.5,
@@ -7455,7 +9256,7 @@ class _LaserPointerPainter extends CustomPainter {
 }
 
 class _LiveStrokePainter extends CustomPainter {
-  final ValueNotifier<List<StrokePoint>> notifier;
+  final LiveStrokeNotifier notifier;
   final ValueNotifier<CanvasShapeItem?>? shapeNotifier;
   final CanvasTool tool;
   final Color color;
@@ -7470,6 +9271,11 @@ class _LiveStrokePainter extends CustomPainter {
   final bool isPageViewMode;
   final int pageNumber;
   final bool highlighterStraightLine;
+  static final Paint _incrementalPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round
+    ..isAntiAlias = true;
 
   _LiveStrokePainter({
     required this.notifier,
@@ -7487,7 +9293,11 @@ class _LiveStrokePainter extends CustomPainter {
     required this.isPageViewMode,
     required this.pageNumber,
     this.highlighterStraightLine = false,
-  }) : super(repaint: shapeNotifier != null ? Listenable.merge([notifier, shapeNotifier]) : notifier);
+  }) : super(
+         repaint: shapeNotifier != null
+             ? Listenable.merge([notifier, shapeNotifier])
+             : notifier,
+       );
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -7500,8 +9310,15 @@ class _LiveStrokePainter extends CustomPainter {
       canvas.scale(zoomScale);
 
       if (isPageViewMode) {
-        const pageRect = Rect.fromLTWH(_kPageLeft, _kPageTop, _kPageWidth, _kPageHeight);
-        canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
+        const pageRect = Rect.fromLTWH(
+          _kPageLeft,
+          _kPageTop,
+          _kPageWidth,
+          _kPageHeight,
+        );
+        canvas.clipRRect(
+          RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+        );
       }
 
       final shapePaint = Paint()
@@ -7560,6 +9377,8 @@ class _LiveStrokePainter extends CustomPainter {
     final points = notifier.value;
     if (points.isEmpty) return;
 
+    CanvasPerformanceProfiler.instance.markPainterExecuted();
+
     canvas.save();
     canvas.clipRect(Offset.zero & size);
 
@@ -7568,29 +9387,56 @@ class _LiveStrokePainter extends CustomPainter {
 
     if (isPageViewMode) {
       // Strictly clip live stroke to the paper sheet
-      const pageRect = Rect.fromLTWH(_kPageLeft, _kPageTop, _kPageWidth, _kPageHeight);
-      canvas.clipRRect(RRect.fromRectAndRadius(pageRect, const Radius.circular(4)));
+      const pageRect = Rect.fromLTWH(
+        _kPageLeft,
+        _kPageTop,
+        _kPageWidth,
+        _kPageHeight,
+      );
+      canvas.clipRRect(
+        RRect.fromRectAndRadius(pageRect, const Radius.circular(4)),
+      );
     }
 
     final isHighlighter = tool == CanvasTool.highlighter;
     final isPencil = tool == CanvasTool.pencil;
-    final pointsToDraw = (isHighlighter && highlighterStraightLine && points.length >= 2)
-        ? HighlighterTool.straightenPoints(points)
-        : points;
-
-    StrokeRenderer.drawStroke(
-      canvas: canvas,
-      points: pointsToDraw,
-      color: color,
-      baseWidth: strokeWidth,
-      penType: isHighlighter ? PenType.marker : (isPencil ? PenType.pencil : penType),
-      opacity: isHighlighter ? (opacity * 0.45).clamp(0.1, 0.45) : opacity,
-      sensitivity: sensitivity,
-      tool: isHighlighter ? 'highlighter' : (isPencil ? 'pencil' : 'pen'),
-      tipSharpness: tipSharpness,
-      tipFlatness: tipFlatness,
-      isLive: true,
-    );
+    if (points.length >= 2) {
+      _incrementalPaint
+        ..color = color.withValues(
+          alpha: isHighlighter
+              ? (opacity * 0.45).clamp(0.1, 0.45)
+              : opacity.clamp(0.0, 1.0),
+        )
+        ..strokeWidth = (isHighlighter ? strokeWidth * 3.0 : strokeWidth).clamp(
+          0.6,
+          120.0,
+        )
+        ..strokeCap = isHighlighter ? StrokeCap.square : StrokeCap.round;
+      canvas.drawPath(notifier.livePath, _incrementalPaint);
+      if (notifier.lastMid != null && notifier.currentTip != null) {
+        canvas.drawLine(
+          notifier.lastMid!,
+          notifier.currentTip!,
+          _incrementalPaint,
+        );
+      }
+    } else {
+      StrokeRenderer.drawStroke(
+        canvas: canvas,
+        points: points,
+        color: color,
+        baseWidth: strokeWidth,
+        penType: isHighlighter
+            ? PenType.marker
+            : (isPencil ? PenType.pencil : penType),
+        opacity: isHighlighter ? (opacity * 0.45).clamp(0.1, 0.45) : opacity,
+        sensitivity: sensitivity,
+        tool: isHighlighter ? 'highlighter' : (isPencil ? 'pencil' : 'pen'),
+        tipSharpness: tipSharpness,
+        tipFlatness: tipFlatness,
+        isLive: true,
+      );
+    }
 
     canvas.restore();
   }
@@ -7709,16 +9555,21 @@ class _DocumentSearchDialogState extends State<_DocumentSearchDialog> {
             });
           }
           for (final obj in page.objects) {
-            if (obj is CanvasTextItem && obj.text.toLowerCase().contains(_query)) {
+            if (obj is CanvasTextItem &&
+                obj.text.toLowerCase().contains(_query)) {
               results.add({
                 'type': 'Note Text',
-                'title': obj.text.length > 50 ? '${obj.text.substring(0, 50)}…' : obj.text,
+                'title': obj.text.length > 50
+                    ? '${obj.text.substring(0, 50)}…'
+                    : obj.text,
                 'subtitle': '${curDoc.name} • Page ${i + 1}',
                 'notebookId': curDoc.id,
                 'pageIndex': i,
                 'icon': Icons.text_snippet_outlined,
               });
-            } else if (obj is CanvasNoteCardItem && (obj.title.toLowerCase().contains(_query) || obj.content.toLowerCase().contains(_query))) {
+            } else if (obj is CanvasNoteCardItem &&
+                (obj.title.toLowerCase().contains(_query) ||
+                    obj.content.toLowerCase().contains(_query))) {
               results.add({
                 'type': 'Card Note',
                 'title': obj.title,
@@ -7754,7 +9605,9 @@ class _DocumentSearchDialogState extends State<_DocumentSearchDialog> {
         decoration: BoxDecoration(
           color: bg,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: isDark ? const Color(0xFF2C354C) : const Color(0xFFE2E8F0)),
+          border: Border.all(
+            color: isDark ? const Color(0xFF2C354C) : const Color(0xFFE2E8F0),
+          ),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: isDark ? 0.6 : 0.2),
@@ -7768,11 +9621,21 @@ class _DocumentSearchDialogState extends State<_DocumentSearchDialog> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: isDark ? const Color(0xFF2C354C) : const Color(0xFFE2E8F0))),
+                border: Border(
+                  bottom: BorderSide(
+                    color: isDark
+                        ? const Color(0xFF2C354C)
+                        : const Color(0xFFE2E8F0),
+                  ),
+                ),
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.search_rounded, color: AppColors.primary, size: 22),
+                  const Icon(
+                    Icons.search_rounded,
+                    color: AppColors.primary,
+                    size: 22,
+                  ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: TextField(
@@ -7780,7 +9643,8 @@ class _DocumentSearchDialogState extends State<_DocumentSearchDialog> {
                       autofocus: true,
                       style: TextStyle(color: textCol, fontSize: 15),
                       decoration: InputDecoration(
-                        hintText: 'Search notebook titles, page names, or notes…',
+                        hintText:
+                            'Search notebook titles, page names, or notes…',
                         hintStyle: TextStyle(color: mutedCol, fontSize: 14),
                         border: InputBorder.none,
                         isDense: true,
@@ -7808,42 +9672,80 @@ class _DocumentSearchDialogState extends State<_DocumentSearchDialog> {
                       ),
                     )
                   : (results.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No matches found for "$_query"',
-                            style: TextStyle(color: mutedCol, fontSize: 13),
-                          ),
-                        )
-                      : ListView.separated(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          itemCount: results.length,
-                          separatorBuilder: (_, _) => Divider(height: 1, color: isDark ? const Color(0xFF22283A) : const Color(0xFFF1F5F9)),
-                          itemBuilder: (ctx, idx) {
-                            final r = results[idx];
-                            return ListTile(
-                              dense: true,
-                              leading: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: AppColors.primary.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(8),
+                        ? Center(
+                            child: Text(
+                              'No matches found for "$_query"',
+                              style: TextStyle(color: mutedCol, fontSize: 13),
+                            ),
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            itemCount: results.length,
+                            separatorBuilder: (_, _) => Divider(
+                              height: 1,
+                              color: isDark
+                                  ? const Color(0xFF22283A)
+                                  : const Color(0xFFF1F5F9),
+                            ),
+                            itemBuilder: (ctx, idx) {
+                              final r = results[idx];
+                              return ListTile(
+                                dense: true,
+                                leading: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.primary.withValues(
+                                      alpha: 0.12,
+                                    ),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Icon(
+                                    r['icon'] as IconData,
+                                    size: 18,
+                                    color: AppColors.primary,
+                                  ),
                                 ),
-                                child: Icon(r['icon'] as IconData, size: 18, color: AppColors.primary),
-                              ),
-                              title: Text(r['title'] as String, style: TextStyle(color: textCol, fontWeight: FontWeight.w600, fontSize: 13)),
-                              subtitle: Text(r['subtitle'] as String, style: TextStyle(color: mutedCol, fontSize: 11)),
-                              trailing: Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: isDark ? const Color(0xFF242C40) : const Color(0xFFE2E8F0),
-                                  borderRadius: BorderRadius.circular(4),
+                                title: Text(
+                                  r['title'] as String,
+                                  style: TextStyle(
+                                    color: textCol,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                  ),
                                 ),
-                                child: Text(r['type'] as String, style: TextStyle(fontSize: 10, color: mutedCol)),
-                              ),
-                              onTap: () => widget.onNavigate(r['notebookId'] as String, r['pageIndex'] as int),
-                            );
-                          },
-                        )),
+                                subtitle: Text(
+                                  r['subtitle'] as String,
+                                  style: TextStyle(
+                                    color: mutedCol,
+                                    fontSize: 11,
+                                  ),
+                                ),
+                                trailing: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isDark
+                                        ? const Color(0xFF242C40)
+                                        : const Color(0xFFE2E8F0),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    r['type'] as String,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: mutedCol,
+                                    ),
+                                  ),
+                                ),
+                                onTap: () => widget.onNavigate(
+                                  r['notebookId'] as String,
+                                  r['pageIndex'] as int,
+                                ),
+                              );
+                            },
+                          )),
             ),
           ],
         ),
@@ -7851,6 +9753,3 @@ class _DocumentSearchDialogState extends State<_DocumentSearchDialog> {
     );
   }
 }
-
-
-

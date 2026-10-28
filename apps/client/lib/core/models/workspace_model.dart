@@ -28,19 +28,31 @@ class WorkspaceModel {
   });
 
   factory WorkspaceModel.fromJson(Map<String, dynamic> json) {
+    DateTime parseDate(dynamic val) {
+      if (val is DateTime) return val;
+      if (val is String && val.isNotEmpty) {
+        final parsed = DateTime.tryParse(val);
+        if (parsed != null) return parsed;
+      }
+      if (val is int) {
+        return DateTime.fromMillisecondsSinceEpoch(val);
+      }
+      return DateTime.now();
+    }
+
     return WorkspaceModel(
-      id: json['id'] as String,
+      id: json['id'] as String? ?? '',
       userId: json['user_id'] as String? ?? '',
-      name: json['name'] as String,
+      name: json['name'] as String? ?? 'My Workspace',
       description: json['description'] as String? ?? '',
       icon: json['icon'] as String? ?? 'folder',
       isPinned: json['is_pinned'] as bool? ?? false,
-      archivedAt: json['archived_at'] != null ? DateTime.parse(json['archived_at']) : null,
-      createdAt: DateTime.parse(json['created_at']),
-      updatedAt: DateTime.parse(json['updated_at']),
-      conversationCount: json['conversation_count'] as int? ?? 0,
-      fileCount: json['file_count'] as int? ?? 0,
-      canvasCount: json['canvas_count'] as int? ?? 0,
+      archivedAt: json['archived_at'] != null ? parseDate(json['archived_at']) : null,
+      createdAt: parseDate(json['created_at']),
+      updatedAt: parseDate(json['updated_at']),
+      conversationCount: (json['conversation_count'] as num?)?.toInt() ?? 0,
+      fileCount: (json['file_count'] as num?)?.toInt() ?? 0,
+      canvasCount: (json['canvas_count'] as num?)?.toInt() ?? 0,
     );
   }
 

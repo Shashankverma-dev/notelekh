@@ -25,48 +25,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final state = widget.state;
-    final isDark = state.isDarkMode;
-    final bg = isDark ? AppColors.darkBg : const Color(0xFFF8F9FA);
-    final textPrimary = isDark ? AppColors.darkTextPrimary : const Color(0xFF1E293B);
-    final textSecondary = isDark ? AppColors.darkTextSecondary : const Color(0xFF64748B);
-    final textMuted = isDark ? AppColors.darkTextMuted : const Color(0xFF94A3B8);
-    final borderColor = isDark ? AppColors.darkBorder : const Color(0xFFE2E8F0);
+    return ListenableBuilder(
+      listenable: widget.state,
+      builder: (context, _) {
+        final state = widget.state;
+        final isDark = state.isDarkMode;
+        final bg = isDark ? AppColors.darkBg : const Color(0xFFF8F9FA);
+        final textPrimary = isDark ? AppColors.darkTextPrimary : const Color(0xFF1E293B);
+        final textSecondary = isDark ? AppColors.darkTextSecondary : const Color(0xFF64748B);
+        final textMuted = isDark ? AppColors.darkTextMuted : const Color(0xFF94A3B8);
+        final borderColor = isDark ? AppColors.darkBorder : const Color(0xFFE2E8F0);
 
-    final screenWidth = MediaQuery.of(context).size.width;
-    final isMobile = screenWidth < 640;
+        final screenWidth = MediaQuery.of(context).size.width;
+        final isMobile = screenWidth < 640;
 
-    return Scaffold(
-      backgroundColor: bg,
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(
-            isMobile ? 16 : 28,
-            isMobile ? 16 : 20,
-            isMobile ? 16 : 28,
-            isMobile ? 28 : 48,
+        return Scaffold(
+          backgroundColor: bg,
+          body: SafeArea(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(
+                isMobile ? 16 : 28,
+                isMobile ? 16 : 20,
+                isMobile ? 16 : 28,
+                isMobile ? 28 : 48,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ── Top Search Bar & Header Bar ────────────────────────────────
+                  _buildTopSearchBar(context, isDark, textPrimary, textSecondary, textMuted, borderColor, isMobile),
+                  SizedBox(height: isMobile ? 20 : 32),
+
+                  // ── Greeting Header ───────────────────────────────────────────
+                  _buildGreetingHeader(state, isDark, textPrimary, textSecondary, textMuted, isMobile),
+                  SizedBox(height: isMobile ? 18 : 24),
+
+                  // ── Notebooks Carousel / Covers ───────────────────────────────
+                  _buildNotebooksSection(context, state, isDark, textPrimary, textMuted),
+                  SizedBox(height: isMobile ? 24 : 36),
+
+                  // ── Bottom Section: Continue Writing ──────────────────────────
+                  _buildContinueWritingSection(context, state, isDark, textPrimary, textSecondary, textMuted, borderColor),
+                ],
+              ),
+            ),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ── Top Search Bar & Header Bar ────────────────────────────────
-              _buildTopSearchBar(context, isDark, textPrimary, textSecondary, textMuted, borderColor, isMobile),
-              SizedBox(height: isMobile ? 20 : 32),
-
-              // ── Greeting Header ───────────────────────────────────────────
-              _buildGreetingHeader(state, isDark, textPrimary, textSecondary, textMuted, isMobile),
-              SizedBox(height: isMobile ? 18 : 24),
-
-              // ── Notebooks Carousel / Covers ───────────────────────────────
-              _buildNotebooksSection(context, state, isDark, textPrimary, textMuted),
-              SizedBox(height: isMobile ? 24 : 36),
-
-              // ── Bottom Section: Continue Writing ──────────────────────────
-              _buildContinueWritingSection(context, state, isDark, textPrimary, textSecondary, textMuted, borderColor),
-            ],
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -128,30 +133,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ),
                 ),
-                if (!isMobile)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: isDark ? Colors.white.withValues(alpha: 0.07) : const Color(0xFFF1F5F9),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(
-                        color: isDark ? Colors.white.withValues(alpha: 0.08) : const Color(0xFFE2E8F0),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '⌘ K',
-                          style: GoogleFonts.inter(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: textMuted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
               ],
             ),
           ),
@@ -364,28 +345,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           style: GoogleFonts.inter(fontSize: 12.5, color: textMuted),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Container(
-                              width: 6,
-                              height: 6,
-                              decoration: const BoxDecoration(
-                                color: Color(0xFF10B981),
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 5),
-                            Text(
-                              'Cloud Synced • Pro Workspace',
-                              style: GoogleFonts.inter(
-                                color: const Color(0xFF10B981),
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
                         ),
                       ],
                     ),
@@ -1144,36 +1103,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                docTitle,
-                                style: GoogleFonts.inter(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                  color: textPrimary,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: isDark ? const Color(0xFF1E3523) : const Color(0xFFE9F5EB),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                'Note Checklist',
-                                style: GoogleFonts.inter(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: isDark ? const Color(0xFF4ADE80) : const Color(0xFF15803D),
-                                ),
-                              ),
-                            ),
-                          ],
+                        Text(
+                          docTitle,
+                          style: GoogleFonts.inter(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: textPrimary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                         const SizedBox(height: 2),
                         Text(
@@ -1186,22 +1123,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ],
                     ),
                   ),
-                  // Progress indicator badge
+                  // Humanized Task Counter Badge
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1E3523) : const Color(0xFFE9F5EB),
-                      borderRadius: BorderRadius.circular(12),
+                      color: totalCount == 0
+                          ? (isDark ? Colors.white.withValues(alpha: 0.05) : const Color(0xFFF1F5F9))
+                          : (completedCount == totalCount
+                              ? (isDark ? const Color(0xFF132A1C) : const Color(0xFFECFDF5))
+                              : (isDark ? Colors.white.withValues(alpha: 0.06) : const Color(0xFFF1F5F9))),
+                      borderRadius: BorderRadius.circular(6),
                       border: Border.all(
-                        color: isDark ? const Color(0xFF2E4E32) : const Color(0xFFD2EED8),
+                        color: totalCount == 0
+                            ? (isDark ? Colors.white.withValues(alpha: 0.08) : const Color(0xFFE2E8F0))
+                            : (completedCount == totalCount
+                                ? (isDark ? const Color(0xFF166534) : const Color(0xFFA7F3D0))
+                                : (isDark ? Colors.white.withValues(alpha: 0.08) : const Color(0xFFE2E8F0))),
                       ),
                     ),
                     child: Text(
-                      totalCount == 0 ? '0 tasks' : '$completedCount / $totalCount done',
+                      totalCount == 0
+                          ? '0 tasks'
+                          : (completedCount == totalCount
+                              ? 'All done ✓'
+                              : '$completedCount of $totalCount done'),
                       style: GoogleFonts.inter(
                         fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                        color: isDark ? const Color(0xFF4ADE80) : const Color(0xFF15803D),
+                        fontWeight: FontWeight.w600,
+                        color: totalCount == 0
+                            ? textMuted
+                            : (completedCount == totalCount
+                                ? (isDark ? const Color(0xFF4ADE80) : const Color(0xFF059669))
+                                : textSecondary),
                       ),
                     ),
                   ),
@@ -1372,15 +1325,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       state.switchNotebook(selectedDoc.id);
                       state.setNavIndex(1);
                     },
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(8),
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                       decoration: BoxDecoration(
-                        color: isDark ? const Color(0xFF1F2B20) : const Color(0xFFE9F5EB),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: isDark ? const Color(0xFF2E4E32) : const Color(0xFFD2EED8),
-                        ),
+                        color: isDark ? const Color(0xFF2563EB) : const Color(0xFF0F172A),
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.08),
+                            blurRadius: 6,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -1389,15 +1346,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             'Open Notebook',
                             style: GoogleFonts.inter(
                               fontSize: 12.5,
-                              fontWeight: FontWeight.w700,
-                              color: isDark ? const Color(0xFF4ADE80) : const Color(0xFF15803D),
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                              letterSpacing: -0.1,
                             ),
                           ),
-                          const SizedBox(width: 4),
-                          Icon(
+                          const SizedBox(width: 6),
+                          const Icon(
                             Icons.arrow_forward_rounded,
                             size: 14,
-                            color: isDark ? const Color(0xFF4ADE80) : const Color(0xFF15803D),
+                            color: Colors.white,
                           ),
                         ],
                       ),

@@ -10,10 +10,30 @@ import 'package:ai_workspace_client/core/models/file_model.dart';
 import 'package:ai_workspace_client/core/models/search_model.dart';
 
 class ApiService {
-  static const String baseUrl = String.fromEnvironment(
-    'API_URL',
-    defaultValue: 'http://127.0.0.1:8000/v1',
-  );
+  static String get baseUrl {
+    const envUrl = String.fromEnvironment('API_URL');
+    if (envUrl.isNotEmpty) return envUrl;
+    if (kIsWeb) {
+      try {
+        final uri = Uri.base;
+        final host = uri.host;
+        // If loaded via Cloudflare Tunnel, localtunnel, or unified reverse proxy (port 5050)
+        if (host.contains('trycloudflare.com') || host.contains('loca.lt') || uri.port == 5050) {
+          return '${uri.origin}/v1';
+        }
+        // If accessed from LAN IP (e.g. 192.168.x.x from an iPad or phone),
+        // route backend calls to the same PC host IP on port 8000.
+        if (host.isNotEmpty &&
+            host != 'localhost' &&
+            host != '127.0.0.1' &&
+            !host.contains('web.app') &&
+            !host.contains('firebaseapp.com')) {
+          return 'http://$host:8000/v1';
+        }
+      } catch (_) {}
+    }
+    return 'http://127.0.0.1:8000/v1';
+  }
 
   /// True when the web app is running on a live domain (e.g. Firebase Hosting)
   /// and the default baseUrl still points to localhost / 127.0.0.1.
@@ -22,9 +42,9 @@ class ApiService {
     if (!kIsWeb) return false;
     try {
       final host = Uri.base.host;
-      final isLocalHost = host == 'localhost' || host == '127.0.0.1' || host.isEmpty;
+      final isCloudHosted = host.contains('web.app') || host.contains('firebaseapp.com');
       final pointsToLocal = baseUrl.contains('127.0.0.1') || baseUrl.contains('localhost');
-      return !isLocalHost && pointsToLocal;
+      return isCloudHosted && pointsToLocal;
     } catch (_) {
       return false;
     }

@@ -94,6 +94,7 @@ venv/
 env/
 ENV/
 .venv/
+scratch/
 
 # Environment Variables & Secrets
 .env

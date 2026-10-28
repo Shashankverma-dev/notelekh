@@ -16,6 +16,7 @@ void main() {
   group('Files & Media Feature Tests', () {
     test('AppState initializes default workspace files and allows document creation', () async {
       final state = AppState();
+      await Future.delayed(const Duration(milliseconds: 100));
 
       // Ensure default files are loaded
       expect(state.workspaceFiles, isNotEmpty);

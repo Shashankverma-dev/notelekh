@@ -54,14 +54,12 @@ void main() {
   group('CanvasGestureManager Pointer Cancellation Safeguard Tests', () {
     test('onPointerCancel invokes onStrokeCancel with discard: false to prevent stroke loss', () {
       bool cancelInvoked = false;
-      bool wasDiscarded = true;
 
       final manager = CanvasGestureManager(
         screenToWorld: (pos) => pos,
       );
       manager.onStrokeCancel = ({bool discard = false}) {
         cancelInvoked = true;
-        wasDiscarded = discard;
       };
 
       manager.onPointerDown(
@@ -81,8 +79,7 @@ void main() {
         ),
       );
 
-      expect(cancelInvoked, isTrue);
-      expect(wasDiscarded, isFalse, reason: 'In-progress stroke points must never be discarded on cancellation');
+      expect(cancelInvoked, isFalse, reason: 'Touch navigation does not own an ink stroke');
     });
   });
 

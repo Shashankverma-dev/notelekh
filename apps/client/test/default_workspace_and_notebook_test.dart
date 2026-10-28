@@ -104,5 +104,57 @@ void main() {
       // The old notebook from old_ws must NOT be in state.canvasDocs
       expect(state.canvasDocs.any((d) => d.id == 'old_doc'), isFalse);
     });
+
+    test('Preserves all old notebooks across simulated page refresh', () async {
+      SharedPreferences.setMockInitialValues({
+        'notelekh_has_user_session': true,
+        'notelekh_last_user_id': 'user_refresh_123',
+      });
+
+      const uid = 'user_refresh_123';
+      const wsId = 'ws_primary';
+
+      // 1. User created 2 distinct notebooks prior to refresh
+      final nb1 = CanvasDocModel(
+        id: 'notebook-1710000000-1',
+        workspaceId: wsId,
+        name: 'Calculus Lecture 1',
+      );
+      final nb2 = CanvasDocModel(
+        id: 'notebook-1710000000-2',
+        workspaceId: wsId,
+        name: 'Notebook 1', // User-created notebook with default name
+      );
+
+      await NotesLocalStorageService.saveDocLocally(nb1, userId: uid);
+      await NotesLocalStorageService.saveDocLocally(nb2, userId: uid);
+      await NotesLocalStorageService.saveActiveDocId(nb2.id, userId: uid);
+
+      // 2. Simulate page reload: AppState fresh instance initializes
+      final freshState = AppState();
+      freshState.userId = uid;
+      freshState.workspaces = [
+        WorkspaceModel(
+          id: wsId,
+          userId: uid,
+          name: 'My Workspace',
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        )
+      ];
+      freshState.currentWorkspace = freshState.workspaces.first;
+
+      // Hydrate docs as happens on reload
+      await freshState.fetchWorkspaceCanvasDocs(wsId);
+
+      // 3. Verify ALL old notebooks remain intact and visible
+      expect(freshState.canvasDocs.length, equals(2));
+      final names = freshState.canvasDocs.map((d) => d.name).toList();
+      expect(names, contains('Calculus Lecture 1'));
+      expect(names, contains('Notebook 1'));
+
+      // Active doc is restored
+      expect(freshState.currentCanvasDoc?.id, equals('notebook-1710000000-2'));
+    });
   });
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:ai_workspace_client/features/canvas/engine/canvas_performance_profiler.dart';
 import 'package:ai_workspace_client/features/canvas/models/canvas_object.dart';
 import 'package:ai_workspace_client/features/canvas/models/stroke.dart';
 import 'package:ai_workspace_client/features/canvas/models/stroke_point.dart';
@@ -13,18 +14,56 @@ enum LassoSelectionMode {
 class LiveStrokeNotifier extends ValueNotifier<List<StrokePoint>> {
   LiveStrokeNotifier() : super([]);
 
+  final Path livePath = Path();
+  Offset? _lastMid;
+  Offset? _currentTip;
+  StrokePoint? _lastPoint;
+
+  Offset? get lastMid => _lastMid;
+  Offset? get currentTip => _currentTip;
+
   void start(StrokePoint point) {
+    CanvasPerformanceProfiler.instance.markPointAppended();
+    livePath.reset();
+    livePath.moveTo(point.x, point.y);
+    _lastPoint = point;
+    _lastMid = null;
+    _currentTip = Offset(point.x, point.y);
+    CanvasPerformanceProfiler.instance.markGeometryUpdated();
     value = [point];
+    CanvasPerformanceProfiler.instance.markRepaintRequested();
   }
 
   void add(StrokePoint point) {
+    CanvasPerformanceProfiler.instance.markPointAppended();
     value.add(point);
+    final previous = _lastPoint;
+    if (previous == null) {
+      livePath.moveTo(point.x, point.y);
+      _currentTip = Offset(point.x, point.y);
+    } else {
+      final mid = Offset((previous.x + point.x) / 2.0, (previous.y + point.y) / 2.0);
+      if (_lastMid == null) {
+        // Second point: line from initial point to mid
+        livePath.lineTo(mid.dx, mid.dy);
+      } else {
+        // Subsequent points: smooth bezier from lastMid through previous point to new mid
+        livePath.quadraticBezierTo(previous.x, previous.y, mid.dx, mid.dy);
+      }
+      _lastMid = mid;
+      _currentTip = Offset(point.x, point.y);
+    }
+    _lastPoint = point;
+    CanvasPerformanceProfiler.instance.markGeometryUpdated();
+    CanvasPerformanceProfiler.instance.markRepaintRequested();
     notifyListeners();
   }
 
   void updateLast(StrokePoint point) {
     if (value.isNotEmpty) {
       value.last = point;
+      _lastPoint = point;
+      _currentTip = Offset(point.x, point.y);
       notifyListeners();
     } else {
       add(point);
@@ -32,6 +71,10 @@ class LiveStrokeNotifier extends ValueNotifier<List<StrokePoint>> {
   }
 
   void clear() {
+    livePath.reset();
+    _lastPoint = null;
+    _lastMid = null;
+    _currentTip = null;
     value = [];
   }
 }
@@ -435,7 +478,7 @@ class CanvasDrawingState with ChangeNotifier {
   }
 
   void clearLivePoints() {
-    liveStrokeNotifier.value = [];
+    liveStrokeNotifier.clear();
   }
 
   @override

@@ -105,12 +105,22 @@ class LassoTool {
             tilt: pt.tilt,
             velocity: pt.velocity,
             timestamp: pt.timestamp,
+            isStylus: pt.isStylus,
           );
         }
+        obj.invalidateCache();
+      } else if (obj is CanvasShapeItem) {
+        obj.bounds = obj.bounds.shift(delta);
+        if (obj.startPoint != null) obj.startPoint = obj.startPoint! + delta;
+        if (obj.endPoint != null) obj.endPoint = obj.endPoint! + delta;
       } else if (obj is CanvasTextItem) {
         obj.position = obj.position + delta;
       } else if (obj is CanvasNoteCardItem) {
         obj.position = obj.position + delta;
+      } else if (obj is CanvasImageItem) {
+        obj.bounds = obj.bounds.shift(delta);
+      } else if (obj is CanvasTapeItem) {
+        obj.rect = obj.rect.shift(delta);
       }
     }
   }

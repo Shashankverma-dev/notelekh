@@ -213,5 +213,84 @@ void main() {
       expect(shape.shapeType, isNot(equals('circle')));
       expect(shape.shapeType, isNot(equals('rectangle')));
     });
+
+    test('Small handwritten letters (e.g. 20x20px letter "o") are NOT recognized as shapes', () {
+      final points = <StrokePoint>[];
+      const int steps = 16;
+      const double radius = 10.0; // 20px wide/tall letter 'o'
+      const Offset center = Offset(100.0, 100.0);
+
+      for (int i = 0; i <= steps; i++) {
+        final angle = (i / steps) * 2 * math.pi;
+        points.add(StrokePoint(
+          x: center.dx + radius * math.cos(angle),
+          y: center.dy + radius * math.sin(angle),
+        ));
+      }
+
+      final shape = ShapeTool.recognizeShape(
+        id: 'handwriting-letter-o',
+        points: points,
+        strokeColor: const Color(0xFF0F172A),
+      );
+
+      // Must be null! Normal handwriting letters must NEVER snap to shapes
+      expect(shape, isNull);
+    });
+
+    test('Handwritten open cursive curves (e.g. letter "c" or "s") are NOT recognized as closed shapes', () {
+      final points = <StrokePoint>[];
+      // Arc of 220 degrees representing letter 'c'
+      for (int i = 0; i <= 20; i++) {
+        final angle = math.pi * 0.2 + (i / 20.0) * (math.pi * 1.5);
+        points.add(StrokePoint(
+          x: 100.0 + 35.0 * math.cos(angle),
+          y: 100.0 + 35.0 * math.sin(angle),
+        ));
+      }
+
+      final shape = ShapeTool.recognizeShape(
+        id: 'handwriting-letter-c',
+        points: points,
+        strokeColor: const Color(0xFF0F172A),
+      );
+
+      expect(shape, isNull);
+    });
+
+    test('Handwritten short dashes or accents (< 50px) are NOT recognized as straight lines', () {
+      final points = <StrokePoint>[];
+      // 30px short dash (e.g. hyphen or t-cross)
+      for (int i = 0; i <= 8; i++) {
+        points.add(StrokePoint(x: 100.0 + 30.0 * (i / 8.0), y: 100.0));
+      }
+
+      final shape = ShapeTool.recognizeShape(
+        id: 'handwriting-dash',
+        points: points,
+        strokeColor: const Color(0xFF0F172A),
+      );
+
+      expect(shape, isNull);
+    });
+
+    test('Irregular freehand scribble/cursive word is NOT coerced into a rectangle', () {
+      final points = <StrokePoint>[];
+      // Zig-zag scribble covering an area
+      for (int i = 0; i < 30; i++) {
+        final x = 100.0 + (i % 6) * 15.0;
+        final y = 100.0 + (i ~/ 6) * 15.0;
+        points.add(StrokePoint(x: x, y: y));
+      }
+
+      final shape = ShapeTool.recognizeShape(
+        id: 'handwriting-scribble',
+        points: points,
+        strokeColor: const Color(0xFF0F172A),
+      );
+
+      // Must not be coerced into rectangle
+      expect(shape, isNull);
+    });
   });
 }

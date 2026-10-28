@@ -6,6 +6,7 @@ import 'package:ai_workspace_client/features/landing/landing_screen.dart';
 import 'package:ai_workspace_client/features/auth/login_screen.dart';
 import 'package:ai_workspace_client/features/shell/responsive_shell.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:ai_workspace_client/core/widgets/workspace_skeleton_shell.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,75 +33,6 @@ class AppScrollBehavior extends MaterialScrollBehavior {
   };
 }
 
-/// Sleek loading shell displayed while authenticating or completing redirect callback,
-/// ensuring the user never sees an unexpected landing page flash.
-class _AuthRestoringShell extends StatelessWidget {
-  final AppState state;
-  const _AuthRestoringShell({required this.state});
-
-  @override
-  Widget build(BuildContext context) {
-    final isDark = state.isDarkMode;
-    return Scaffold(
-      backgroundColor: isDark ? const Color(0xFF0C0E16) : const Color(0xFFF8FAFC),
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF6366F1).withValues(alpha: 0.3),
-                    blurRadius: 20,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: const Center(
-                child: Icon(
-                  Icons.auto_stories_rounded,
-                  color: Colors.white,
-                  size: 28,
-                ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  isDark ? const Color(0xFF818CF8) : const Color(0xFF6366F1),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Entering your workspace...',
-              style: TextStyle(
-                fontFamily: 'Plus Jakarta Sans',
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class AIWorkspaceApp extends StatefulWidget {
   const AIWorkspaceApp({super.key});
 
@@ -114,7 +46,7 @@ class _AIWorkspaceAppState extends State<AIWorkspaceApp> {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: _appState,
+      listenable: _appState.appShellNotifier,
       builder: (context, _) {
         return MaterialApp(
           title: 'Notelekh',
@@ -126,7 +58,7 @@ class _AIWorkspaceAppState extends State<AIWorkspaceApp> {
           home: _appState.isAuthenticated
               ? ResponsiveShell(state: _appState)
               : _appState.isAuthRestoring
-                  ? _AuthRestoringShell(state: _appState)
+                  ? WorkspaceSkeletonShell(isDarkMode: _appState.isDarkMode)
                   : _appState.showLoginScreen
                       ? LoginScreen(state: _appState)
                       : LandingScreen(state: _appState),

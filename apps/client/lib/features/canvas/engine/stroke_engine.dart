@@ -1,5 +1,4 @@
 import 'dart:ui';
-import 'package:flutter/material.dart';
 import 'package:ai_workspace_client/features/canvas/models/stroke_point.dart';
 import 'package:ai_workspace_client/features/canvas/models/stroke.dart';
 import 'package:ai_workspace_client/features/canvas/models/canvas_object.dart';
@@ -76,6 +75,40 @@ class StrokeEngine {
     double tipSharpness = 0.75,
     double tipFlatness = 0.66,
   }) {
+    // Ultra-fast GPU path: reuse recorded Skia display list if stroke is already committed
+    if (!isLive && stroke.cachedPicture != null) {
+      canvas.drawPicture(stroke.cachedPicture!);
+      return;
+    }
+
+    if (!isLive) {
+      final recorder = PictureRecorder();
+      final recordCanvas = Canvas(recorder);
+      final pointsToDraw = stroke.points.length > 2
+          ? (stroke.cachedInterpolatedPoints ??=
+              StrokeInterpolator.interpolate(stroke.points, defaultSegments: 4))
+          : stroke.points;
+
+      StrokeRenderer.drawStroke(
+        canvas: recordCanvas,
+        points: pointsToDraw,
+        color: stroke.color,
+        baseWidth: stroke.strokeWidth,
+        penType: stroke.penType,
+        opacity: stroke.opacity,
+        sensitivity: sensitivity,
+        tool: stroke.tool,
+        viewport: viewport,
+        tipSharpness: tipSharpness,
+        tipFlatness: tipFlatness,
+        isLive: false,
+      );
+      final pic = recorder.endRecording();
+      stroke.cachedPicture = pic;
+      canvas.drawPicture(pic);
+      return;
+    }
+
     final pointsToDraw = stroke.points.length > 2
         ? (stroke.cachedInterpolatedPoints ??=
             StrokeInterpolator.interpolate(stroke.points, defaultSegments: 4))

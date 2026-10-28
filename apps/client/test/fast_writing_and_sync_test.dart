@@ -3,7 +3,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ai_workspace_client/state/app_state.dart';
 import 'package:ai_workspace_client/features/canvas/models/page_model.dart';
-import 'package:ai_workspace_client/features/canvas/models/canvas_object.dart';
 import 'package:ai_workspace_client/features/canvas/models/stroke.dart';
 import 'package:ai_workspace_client/features/canvas/models/stroke_point.dart';
 import 'package:ai_workspace_client/features/canvas/engine/stroke_interpolator.dart';

@@ -18,14 +18,17 @@ class AppSidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = state.isDarkMode;
-    final bg = isDark ? const Color(0xFF12151F) : const Color(0xFFF9FAFB);
-    final borderColor = isDark ? const Color(0xFF1E2536) : const Color(0xFFE5E7EB);
-    final textPrimary = isDark ? Colors.white : const Color(0xFF0F172A);
-    final textMuted = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+    return ListenableBuilder(
+      listenable: state,
+      builder: (context, _) {
+        final isDark = state.isDarkMode;
+        final bg = isDark ? const Color(0xFF12151F) : const Color(0xFFF9FAFB);
+        final borderColor = isDark ? const Color(0xFF1E2536) : const Color(0xFFE5E7EB);
+        final textPrimary = isDark ? Colors.white : const Color(0xFF0F172A);
+        final textMuted = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
 
-    return Container(
-      width: 255,
+        return Container(
+          width: 255,
       decoration: BoxDecoration(
         color: bg,
         border: Border(right: BorderSide(color: borderColor, width: 1.2)),
@@ -341,67 +344,28 @@ class AppSidebar extends StatelessWidget {
                     ],
                   ),
                   const Divider(height: 14),
-                  // Workspace Studio Bar & Settings Access + Sign Out
-                  Row(
-                    children: [
-                      Expanded(
-                        child: InkWell(
-                          onTap: () => state.setNavIndex(4),
-                          borderRadius: BorderRadius.circular(10),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 22,
-                                  height: 22,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF5C59F2),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Center(
-                                    child: Icon(Icons.auto_awesome, color: Colors.white, size: 13),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        'Notelekh Studio',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: textPrimary),
-                                      ),
-                                      Text(
-                                        'Workspace Active',
-                                        style: GoogleFonts.inter(fontSize: 9.5, color: textMuted),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Icon(Icons.tune_rounded, size: 14, color: textMuted),
-                              ],
+                  InkWell(
+                    onTap: () async {
+                      await state.signOut();
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                      child: Row(
+                        children: [
+                          Icon(Icons.logout_rounded, size: 15, color: textMuted),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Sign out',
+                            style: GoogleFonts.inter(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w500,
+                              color: textMuted,
                             ),
                           ),
-                        ),
+                        ],
                       ),
-                      const SizedBox(width: 4),
-                      Tooltip(
-                        message: 'Sign Out (Exit to Landing Page)',
-                        child: InkWell(
-                          onTap: () async {
-                            await state.signOut();
-                          },
-                          borderRadius: BorderRadius.circular(8),
-                          child: Padding(
-                            padding: const EdgeInsets.all(6),
-                            child: Icon(Icons.logout_rounded, size: 15, color: textMuted),
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ],
               ),
@@ -410,7 +374,9 @@ class AppSidebar extends StatelessWidget {
         ],
       ),
     );
-  }
+  },
+);
+}
 
   void _showCreateWorkspaceDialog(BuildContext context) {
     final nameCtrl = TextEditingController();

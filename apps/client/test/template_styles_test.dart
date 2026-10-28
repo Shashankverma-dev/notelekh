@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ai_workspace_client/state/app_state.dart';
 import 'package:ai_workspace_client/core/models/canvas_models.dart';
 
@@ -9,6 +10,7 @@ void main() {
     late AppState state;
 
     setUp(() {
+      SharedPreferences.setMockInitialValues({});
       state = AppState();
     });
 

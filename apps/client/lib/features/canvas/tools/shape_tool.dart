@@ -59,7 +59,7 @@ class ShapeTool {
       pathLength += (points[i + 1].toOffset() - points[i].toOffset()).distance;
     }
 
-    if (pathLength == 0) return null;
+    if (pathLength < 50.0) return null;
 
     // 1. Check for straight line:
     // Compute maximum perpendicular deviation from the start-to-end line segment
@@ -78,12 +78,12 @@ class ShapeTool {
       if (dist > maxDeviation) maxDeviation = dist;
     }
 
-    final isStraightByRatio = (totalDistance / pathLength) > 0.84;
-    final isStraightByDeviation = totalDistance > 20.0 && maxDeviation < math.max(14.0, totalDistance * 0.10);
+    final isStraightByRatio = (totalDistance / pathLength) > 0.92;
+    final isStraightByDeviation = totalDistance >= 50.0 && maxDeviation < math.max(6.0, totalDistance * 0.05);
 
-    // Only recognize as a straight line if it is open (not closed)
-    final isOpen = totalDistance > math.max(35.0, pathLength * 0.25);
-    if ((isStraightByRatio || isStraightByDeviation) && isOpen) {
+    // Only recognize as a straight line if it is open (not closed) and meets minimum length
+    final isOpen = totalDistance > math.max(48.0, pathLength * 0.35);
+    if ((isStraightByRatio || isStraightByDeviation) && isOpen && totalDistance >= 50.0) {
       final rect = Rect.fromPoints(start, end);
       return CanvasShapeItem(
         id: id,
@@ -95,6 +95,10 @@ class ShapeTool {
         endPoint: end,
       );
     }
+
+    // Closed shapes need more samples than an intentional straight line,
+    // and a minimum path length of 80px to distinguish from handwriting letters.
+    if (points.length < 8 || pathLength < 80.0) return null;
 
     // 2. Check for closed shapes (Rectangle, Square, Circle, Triangle)
     final offsets = points.map((p) => p.toOffset()).toList();
@@ -115,7 +119,8 @@ class ShapeTool {
     final width = bbox.width;
     final height = bbox.height;
 
-    if (width < 16 || height < 16) return null;
+    // Reject small strokes: handwriting letters ('o', 'a', 'e', '0', '8') are typically 15-25px
+    if (width < 30.0 || height < 30.0) return null;
 
     // Stroke closure check:
     // A stroke is closed if start and end are close, or if the end point overlaps
@@ -132,8 +137,10 @@ class ShapeTool {
       if (d < minGapToClose) minGapToClose = d;
     }
 
-    final isClosed = minGapToClose < math.max(65.0, math.max(width, height) * 0.45) ||
-        (minGapToClose < pathLength * 0.38);
+    // Strict closure check: gap cannot exceed 32px or 18% of dimension.
+    // Avoid loose pathLength ratios that misclassify open cursive curves as closed shapes.
+    final maxAllowedGap = math.min(32.0, math.max(18.0, math.max(width, height) * 0.18));
+    final isClosed = minGapToClose <= maxAllowedGap;
 
     if (!isClosed) return null;
 
@@ -245,8 +252,7 @@ class ShapeTool {
       );
     }
 
-    // 4. Fallback for slightly imperfect hand drawings:
-    // If ellipse fit is closer than rectangular box, classify as circle/ellipse!
+    // 4. Fallback for slightly imperfect hand-drawn circles/ellipses:
     if (ellipseFitError < 0.20 && corners.length <= 3 && areaRatio <= 0.83) {
       final isCircle = (width - height).abs() / math.max(width, height) < 0.25;
       final finalBounds = isCircle
@@ -261,14 +267,6 @@ class ShapeTool {
         id: id,
         shapeType: 'circle',
         bounds: finalBounds,
-        strokeColor: strokeColor,
-        strokeWidth: strokeWidth,
-      );
-    } else if (areaRatio >= 0.78) {
-      return CanvasShapeItem(
-        id: id,
-        shapeType: 'rectangle',
-        bounds: bbox,
         strokeColor: strokeColor,
         strokeWidth: strokeWidth,
       );

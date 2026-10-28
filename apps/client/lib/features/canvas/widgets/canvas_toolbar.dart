@@ -515,7 +515,12 @@ class CanvasToolbar extends StatelessWidget {
       message: tooltip,
       child: GestureDetector(
         onTap: () {
-          if (isSelected && (tool == CanvasTool.pen || tool == CanvasTool.highlighter)) {
+          if (isSelected &&
+              (tool == CanvasTool.pen ||
+                  tool == CanvasTool.pencil ||
+                  tool == CanvasTool.brush ||
+                  tool == CanvasTool.highlighter ||
+                  tool == CanvasTool.lasso)) {
             onOpenToolSettings();
           } else if (isSelected && isHand) {
             onToolSelected(CanvasTool.pen);

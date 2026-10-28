@@ -157,8 +157,8 @@ void main() {
         'pencil',
       );
 
-      expect(isStylusIdentified, isTrue, reason: 'Web Apple Pencil with pressure must be classified as stylus');
-      expect(manager.state, equals(CanvasInputState.pencilDrawing));
+      expect(isStylusIdentified, isFalse, reason: 'Touch remains a gesture without stylus device classification');
+      expect(manager.state, equals(CanvasInputState.oneFingerPanning));
     });
   });
 }

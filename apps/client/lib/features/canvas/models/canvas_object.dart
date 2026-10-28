@@ -555,15 +555,18 @@ class CanvasNoteCardItem extends CanvasObjectItem {
   }) : super(objectType: 'note_card');
 
   CanvasNoteCardItem copyWith({
+    String? id,
     String? title,
     String? content,
     Offset? position,
     double? width,
     double? height,
     bool? isLoading,
+    int? zIndex,
+    bool? isSelected,
   }) {
     return CanvasNoteCardItem(
-      id: id,
+      id: id ?? this.id,
       title: title ?? this.title,
       content: content ?? this.content,
       position: position ?? this.position,
@@ -572,8 +575,8 @@ class CanvasNoteCardItem extends CanvasObjectItem {
       backgroundColor: backgroundColor,
       textColor: textColor,
       isLoading: isLoading ?? this.isLoading,
-      zIndex: zIndex,
-      isSelected: isSelected,
+      zIndex: zIndex ?? this.zIndex,
+      isSelected: isSelected ?? this.isSelected,
     );
   }
 
@@ -649,6 +652,30 @@ class CanvasImageItem extends CanvasObjectItem {
     super.isSelected = false,
   }) : super(objectType: 'image');
 
+  CanvasImageItem copyWith({
+    String? id,
+    Rect? bounds,
+    String? imageUrl,
+    String? assetPath,
+    String? localFilePath,
+    String? base64Data,
+    double? rotation,
+    int? zIndex,
+    bool? isSelected,
+  }) {
+    return CanvasImageItem(
+      id: id ?? this.id,
+      bounds: bounds ?? this.bounds,
+      imageUrl: imageUrl ?? this.imageUrl,
+      assetPath: assetPath ?? this.assetPath,
+      localFilePath: localFilePath ?? this.localFilePath,
+      base64Data: base64Data ?? this.base64Data,
+      rotation: rotation ?? this.rotation,
+      zIndex: zIndex ?? this.zIndex,
+      isSelected: isSelected ?? this.isSelected,
+    );
+  }
+
   @override
   Rect getBoundingBox() => bounds;
 
@@ -705,6 +732,24 @@ class CanvasTapeItem extends CanvasObjectItem {
     super.isSelected = false,
   }) : super(objectType: 'tape');
 
+  CanvasTapeItem copyWith({
+    String? id,
+    Rect? rect,
+    Color? color,
+    bool? isMasked,
+    int? zIndex,
+    bool? isSelected,
+  }) {
+    return CanvasTapeItem(
+      id: id ?? this.id,
+      rect: rect ?? this.rect,
+      color: color ?? this.color,
+      isMasked: isMasked ?? this.isMasked,
+      zIndex: zIndex ?? this.zIndex,
+      isSelected: isSelected ?? this.isSelected,
+    );
+  }
+
   @override
   Rect getBoundingBox() => rect;
 
@@ -743,4 +788,5 @@ class CanvasTapeItem extends CanvasObjectItem {
     );
   }
 }
+
 
